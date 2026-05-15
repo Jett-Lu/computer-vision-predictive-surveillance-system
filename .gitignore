@@ -1,2 +1,6 @@
 # Virtual Environment
 .venv
+
+# Python cache / local temp files
+__pycache__/
+.tmp/
