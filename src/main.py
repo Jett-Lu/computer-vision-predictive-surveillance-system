@@ -1,31 +1,65 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import cv2
-from ultralytics import YOLO
 
-model = YOLO("../data/yolov8n.pt")
+from pose import DEFAULT_MODEL_PATH, PoseAnalyzer
 
-cap = cv2.VideoCapture(0)   # 0 = default webcam; try 1, 2, ... for others
-if not cap.isOpened():
-    raise RuntimeError("Could not open webcam")
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Draw a MoveNet Lightning body skeleton over a webcam or video feed.",
+    )
+    parser.add_argument(
+        "--source",
+        default="0",
+        help="Webcam index, video path, or RTSP/HTTP camera URL.",
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=DEFAULT_MODEL_PATH,
+        help="Path to the MoveNet Lightning TFLite model.",
+    )
+    return parser.parse_args()
 
-    # Run inference on this single frame
-    results = model(frame, conf=0.25, iou=0.45, verbose=False, classes=[0])
 
-    # results[0].plot() returns a numpy array (BGR) with boxes + labels drawn
-    annotated = results[0].plot()
+def normalize_source(source: str) -> int | str:
+    return int(source) if source.isdigit() else source
 
-    # Example: print detected class names for this frame
-    names = results[0].names
-    for cls_id in results[0].boxes.cls.tolist():
-        print(names[int(cls_id)])
 
-    cv2.imshow("YOLOv8n Webcam", annotated)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+def run_pose_viewer(source: str, model_path: Path) -> None:
+    capture = cv2.VideoCapture(normalize_source(source))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open video source: {source}")
 
-cap.release()
-cv2.destroyAllWindows()
+    analyzer = PoseAnalyzer(model_path=model_path)
+
+    try:
+        print("MoveNet skeleton viewer is running.")
+        print("Press q to quit.")
+
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+
+            annotated = analyzer.analyze(frame)
+            cv2.imshow("Body Recognition", annotated)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        capture.release()
+        cv2.destroyAllWindows()
+
+
+def main() -> None:
+    args = parse_args()
+    run_pose_viewer(source=args.source, model_path=args.model)
+
+
+if __name__ == "__main__":
+    main()
