@@ -1,2 +1,3 @@
-# Virtual Environment
 .venv
+.tmp
+__pycache__
