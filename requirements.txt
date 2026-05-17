@@ -1,2 +1,3 @@
 ultralytics
-mediapipe
+# mediapipe
+face-recognition

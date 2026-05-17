@@ -1,19 +1,10 @@
 import cv2
 from ultralytics import YOLO
-import mediapipe as mp
 import numpy as np
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+import face_recognition
 
 # Initialize the model
 model = YOLO('../data/yolov8n.pt')
-
-MODEL_PATH = '../data/blaze_face_short_range.tflite'
-
-# Create the model
-base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-options = vision.FaceDetectorOptions(base_options=base_options)
-detector = vision.FaceDetector.create_from_options(options)
 
 # Start screen capturing
 cap = cv2.VideoCapture(0)
@@ -38,7 +29,7 @@ while True:
     for i in range(len(boxes)):
         # Crop out the person to detect the faces
         x1, y1, x2, y2 = boxes.xyxy[i].int().tolist()
-        cropped_img = annotated[y1:y2, x1:x2]
+        cropped_img = frame[y1:y2, x1:x2]
 
         """
         # Optional - display the cropped img and coordinates
@@ -47,42 +38,10 @@ while True:
         cv2.imshow('Cropped image', cropped_img)
         """
 
-        # OpenCV uses BGR but MediaPipe uses RGB so we need to correct it
-        corrected_img = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
-
-        # Convert np.ndarray to mp.image
-        img = mp.Image(image_format=mp.ImageFormat.SRGB, data=corrected_img)
-
-        # Detect the faces
-        detection_result = detector.detect(img)
-
-        #iterate through all the detections and visualize it
-        face_results = detection_result.detections
-        # print("Results: ")
-        # print(face_results)
-        # print("")
-        for detection in face_results:
-            confidence = round(detection.categories[0].score, 2)
-
-            # Get the bounding box coords
-            box_x1 = detection.bounding_box.origin_x + x1
-            box_y1 = detection.bounding_box.origin_y + y1
-            box_x2 = box_x1 + detection.bounding_box.width
-            box_y2 = box_y1 + detection.bounding_box.height
-
-            cv2.rectangle(annotated, (box_x1, box_y1), (box_x2, box_y2), (255, 255, 255), 1)
-            cv2.putText(annotated, f"({confidence})", (box_x1 + 10, box_y1 + 20), cv2.FONT_HERSHEY_PLAIN, 1, (255, 255, 255), 1)
-
-            # Get the landmarks
-            for landmark in detection.keypoints:
-                """
-                Denormalize the landmarks. The landmarks given are in the range 0 to 1
-                relative to the image's height and width passed into the detection
-                """
-                px = (landmark.x * (x2 - x1)) + x1
-                py = (landmark.y * (y2 - y1)) + y1
-
-                cv2.circle(annotated, (int(px), int(py)), 1, (0, 255, 0), 2)
+        # OpenCV uses BGR but face_recognition uses RGB so we need to correct it
+        # corrected_img = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
+        # face_location = face_recognition.face_locations(corrected_img, number_of_times_to_upsample=1, model='hog')
+        # encodings = face_recognition.face_encodings(corrected_img, face_location, num_jitters=1, model='small')
 
     cv2.imshow('Anomaly Detection', annotated)
     # cv2.imshow('Detected boxes', boxes)
