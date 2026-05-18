@@ -21,6 +21,16 @@ class States(Enum):
     DELETE_COMPLETE = auto()
     DELETE_ABORT = auto()
 
+ENROL_STATES = {
+    States.ENROL_START,
+    States.ENROL_GET_NAME,
+    States.ENROL_DUPLICATE_PEOPLE,
+    States.ENROL_GET_NUM_OF_PICS,
+    States.ENROL_TAKE_PICS,
+    States.ENROL_COMPLETE,
+    States.ENROL_ABORT,
+}
+
 RED_TEXT = '\033[91m'
 RESET_TEXT = '\033[0m'
 
@@ -47,7 +57,7 @@ def displayText(state):
         print("————— Enter a name for the enrolled person —————")
         print("Enter 'exit' to abort enrolling")
     elif state == States.ENROL_DUPLICATE_PEOPLE:
-        print("That person already exists. Do you want to ovewrite or use pre-existing?")
+        print("That person already exists. Do you want to overwrite or use pre-existing and add more photos?")
         print("[a] — Overwrite")
         print("[b] — Use pre-existing")
         print("Enter 'exit' to abort enrolling")
@@ -55,6 +65,13 @@ def displayText(state):
         print("————— Enter the number of pictures you want to take —————")
     elif state == States.ENROL_TAKE_PICS:
         print("Opening Camera...")
+    elif state == States.ENROL_COMPLETE:
+        print("————— Enrollment is complete! Enter 'exit' to return to the main menu —————")
+    elif state == States.ENROL_ABORT:
+        print("————— Enrolment aborted! —————")
+        print("Do you want to resume or exit?")
+        print("[a] — Resume")
+        print("[b] — Exit")
 
 def getUserResponse(errorMsg):
     if errorMsg:
@@ -69,15 +86,53 @@ def main():
     error = ""
     path = ""
     enrolled_label = ""
-    enrolling = False
     num_of_pics = 0
 
     while True:
 
-        # Handle start of the ENROL states
+        # State Entry Actions
         if curr_state == States.ENROL_START:
             curr_state = States.ENROL_GET_NAME
-            enrolling = True
+            continue
+        elif curr_state == States.ENROL_TAKE_PICS:
+            count = 0
+            cap = cv2.VideoCapture(0)
+
+            if not cap.isOpened():
+                error = "Could not open webcam. Exited to main menu"
+                curr_state = States.MENU
+                continue
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to grab frame... Exiting")
+                    break
+                
+                key = cv2.waitKey(1) & 0xFF
+
+                if key == ord('s') and count < num_of_pics:
+                    timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
+                    img_name = f"{enrolled_label}_{count}_{timestamp}.jpg"
+                    full_path = path + img_name
+                    if cv2.imwrite(full_path, frame):
+                        count += 1
+                        if count >= num_of_pics:
+                            curr_state = States.ENROL_COMPLETE
+                            break
+                    else:
+                        print("Failed to write to disk")
+
+                cv2.putText(frame, f"Number of Images: {count}. Press 'q' to quit early", (10, 20), cv2.FONT_HERSHEY_PLAIN, 1, (0,0,0), 1)
+                cv2.imshow("Take Photo", frame)
+
+                if key == ord('q') and count < num_of_pics:
+                    curr_state = States.ENROL_ABORT
+                    break
+
+            cap.release()
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)
             continue
 
         displayText(curr_state)
@@ -86,10 +141,9 @@ def main():
         error = ""
 
         # Handle Enrolling states
-        if enrolling == True:
+        if curr_state in ENROL_STATES:
             if user_res == 'exit':
                 curr_state = States.MENU
-                enrolling = False
                 continue
             
             # Handle States
@@ -107,57 +161,31 @@ def main():
             elif curr_state == States.ENROL_DUPLICATE_PEOPLE:
                 if user_res == 'a':
                     # Delete the directory
-                    shutil.rmtree(path)
+                    try:
+                        shutil.rmtree(path)
 
-                    # Re-create it
-                    os.makedirs(path)
+                        # Re-create it
+                        os.makedirs(path, exist_ok=True)
+                    except OSError:
+                        error = "Failed to delete path... Returning to main menu"
+                        curr_state = States.MENU
+                        continue
+
+                elif user_res != 'b':
+                    error = "Invalid Command. Enter the correct option as listed before"
+                    continue
                 curr_state = States.ENROL_GET_NUM_OF_PICS
             elif curr_state == States.ENROL_GET_NUM_OF_PICS:
                 try:
                     num_of_pics = int(user_res)
+
+                    if num_of_pics <= 0:
+                        error = "Enter a value greater than 0"
+                        continue
+
                     curr_state = States.ENROL_TAKE_PICS
                 except ValueError:
                     error = "Invalid input. Please enter an integer number"
-            elif curr_state == States.ENROL_TAKE_PICS:
-                count = 0
-                cap = cv2.VideoCapture(0)
-
-                if not cap.isOpened():
-                    error = "Could not open webcam. Exited to main menu"
-                    curr_state = States.MENU
-                    continue
-                
-                while True:
-                    ret, frame = cv2.read()
-                    if not ret:
-                        print("Failed to grab frame... Exiting")
-                        break
-                    
-                    key = cv2.waitKey(1) & 0xFF
-
-                    if key == ord('s') and count < num_of_pics:
-                        timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
-                        img_name = f"{enrolled_label}_{count}_{timestamp}.jpg"
-                        full_path = path + img_name
-                        if cv2.imwrite(full_path, frame):
-                            count += 1
-                            if count >= num_of_pics:
-                                curr_state = States.ENROL_COMPLETE
-                                break
-                        else:
-                            print("Failed to write to disk")
-
-                    cv2.putText(frame, f"Number of Images: {count}. Press 'q' to quit early", (10, 20), cv2.FONT_HERSHEY_PLAIN, 1, (0,0,0), 1)
-                    cv2.imshow("Take Photo", frame)
-
-                    if key == ord('q') and count < num_of_pics:
-                        curr_state = States.ENROL_ABORT
-                        break
-                
-                cap.release()
-                cv2.destroyAllWindows()
-
-
             continue
 
         # Handle user input
