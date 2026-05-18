@@ -87,6 +87,7 @@ def main():
     path = ""
     enrolled_label = ""
     num_of_pics = 0
+    saved_count = 0
 
     while True:
 
@@ -95,7 +96,7 @@ def main():
             curr_state = States.ENROL_GET_NAME
             continue
         elif curr_state == States.ENROL_TAKE_PICS:
-            count = 0
+            count = saved_count
             cap = cv2.VideoCapture(0)
 
             if not cap.isOpened():
@@ -119,6 +120,7 @@ def main():
                         count += 1
                         if count >= num_of_pics:
                             curr_state = States.ENROL_COMPLETE
+                            saved_count = 0
                             break
                     else:
                         print("Failed to write to disk")
@@ -128,6 +130,7 @@ def main():
 
                 if key == ord('q') and count < num_of_pics:
                     curr_state = States.ENROL_ABORT
+                    saved_count = count
                     break
 
             cap.release()
@@ -186,6 +189,11 @@ def main():
                     curr_state = States.ENROL_TAKE_PICS
                 except ValueError:
                     error = "Invalid input. Please enter an integer number"
+            elif curr_state == States.ENROL_ABORT:
+                if user_res == 'a':
+                    curr_state = States.ENROL_TAKE_PICS
+                else:
+                    curr_state = States.MENU
             continue
 
         # Handle user input
@@ -201,7 +209,12 @@ def main():
             curr_state = States.MENU
         elif user_res == 'enrol':
             curr_state = States.ENROL_START
+
+            # Reset all enrolment related variables
             path = ""
+            enrolled_label = ""
+            saved_count = 0
+            num_of_pics = 0
         else:
             error = "Invalid Command. Go to 'help' to see list of commands"
             continue
