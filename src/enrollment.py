@@ -1,131 +1,181 @@
 import os
+import shutil
 import cv2
 import datetime
+from enum import Enum, auto
 
-state = ['menu', 'help', 'enrol_get_name', 'enrol_get_num_of_pics', 'enrol_get_pictures', 'enrol_complete', 'enrol_aborted']
-current_state = state[0]
-num_error = False
-label = ""
-num_of_pics = 0
-enrol_aborted = False
-img_count = 0
+# States for the state machine
+class States(Enum):
+    MENU = auto()
+    HELP = auto()
+    ENROL_START = auto()
+    ENROL_GET_NAME = auto()
+    ENROL_DUPLICATE_PEOPLE = auto()
+    ENROL_GET_NUM_OF_PICS = auto()
+    ENROL_TAKE_PICS = auto()
+    ENROL_COMPLETE = auto()
+    ENROL_ABORT = auto()
+    DELETE_START = auto()
+    DELETE_CHOOSE_ENROLLED = auto()
+    DELETE_CONFIRM = auto()
+    DELETE_COMPLETE = auto()
+    DELETE_ABORT = auto()
 
-def display(curr_state):
+RED_TEXT = '\033[91m'
+RESET_TEXT = '\033[0m'
+
+def displayText(state):
+    # Clear the terminal
     os.system('cls' if os.name == 'nt' else 'clear')
-    if curr_state == state[0]:
+    if state == States.MENU:
         print("""
-     █████  ███    ██  ██████  ███    ███  █████  ██      ██    ██     ██████  ███████ ████████ ███████  ██████ ████████ ██  ██████  ███    ██ 
-    ██   ██ ████   ██ ██    ██ ████  ████ ██   ██ ██       ██  ██      ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ████   ██ 
-    ███████ ██ ██  ██ ██    ██ ██ ████ ██ ███████ ██        ████       ██   ██ █████      ██    █████   ██         ██    ██ ██    ██ ██ ██  ██ 
-    ██   ██ ██  ██ ██ ██    ██ ██  ██  ██ ██   ██ ██         ██        ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ██  ██ ██ 
-    ██   ██ ██   ████  ██████  ██      ██ ██   ██ ███████    ██        ██████  ███████    ██    ███████  ██████    ██    ██  ██████  ██   ████
-    """)
-        print("——— Enter 'help' to see options ———")
-    elif curr_state == state[1]:
-        print("——— List of Commands ———")
+ █████  ███    ██  ██████  ███    ███  █████  ██      ██    ██     ██████  ███████ ████████ ███████  ██████ ████████ ██  ██████  ███    ██ 
+██   ██ ████   ██ ██    ██ ████  ████ ██   ██ ██       ██  ██      ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ████   ██ 
+███████ ██ ██  ██ ██    ██ ██ ████ ██ ███████ ██        ████       ██   ██ █████      ██    █████   ██         ██    ██ ██    ██ ██ ██  ██ 
+██   ██ ██  ██ ██ ██    ██ ██  ██  ██ ██   ██ ██         ██        ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ██  ██ ██ 
+██   ██ ██   ████  ██████  ██      ██ ██   ██ ███████    ██        ██████  ███████    ██    ███████  ██████    ██    ██  ██████  ██   ████
+        """)
+        print("————— Enter 'help' to see options —————")
+    elif state == States.HELP:
+        print("————— List of Commands —————")
         print("[q] — Quit the program")
         print("[help] — Access the help screen")
         print("[menu] — Go back to the main menu")
         print("[enrol] — Enrol a person into the database")
-    elif curr_state == state[2]:
-        print("——— Enter a name ———")
-        print("Enter 'exit' to exit outside of enrolment")
-    elif curr_state == state[3]:
-        print("——— Enter the amount of pictures you want to take ———")
-        print("Enter 'exit' to exit outside of enrolment")
-        if num_error:
-            print("Invalid Input. Please enter a valid integer value")
-    elif curr_state == state[5]:
-        print("——— Enrolment complete! Enter 'exit' to return to main menu ———")
-    elif curr_state == state[6]:
-        print("——— Enrolment was aborted! Enter 'exit' to return to main menu or enter 'again' to re-enrol ———")
-    return
+        print("[delete] — Delete a currently enrolled person")
+    elif state == States.ENROL_GET_NAME:
+        print("————— Enter a name for the enrolled person —————")
+        print("Enter 'exit' to abort enrolling")
+    elif state == States.ENROL_DUPLICATE_PEOPLE:
+        print("That person already exists. Do you want to ovewrite or use pre-existing?")
+        print("[a] — Overwrite")
+        print("[b] — Use pre-existing")
+        print("Enter 'exit' to abort enrolling")
+    elif state == States.ENROL_GET_NUM_OF_PICS:
+        print("————— Enter the number of pictures you want to take —————")
+    elif state == States.ENROL_TAKE_PICS:
+        print("Opening Camera...")
 
-while True:
-    display(curr_state=current_state)
-    if current_state == state[4]:
-        print("Opening camera...")
-        cap = cv2.VideoCapture(0)
-
-        path = f"../enrollments/{label}/"
-        if not os.path.exists(path):
-            enrol_aborted = False
-            os.makedirs(path)
-        else:
-            print("Path already exists")
-
-        if not enrol_aborted:
-            img_count = 0
-
-        if not cap.isOpened():
-            raise RuntimeError("Error — Can't open the webcam. Check for available camera.")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to grab frame, exiting...")
-                break
-            
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('s') and img_count < num_of_pics:
-                timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
-                img_name = f"{label}_{img_count}_{timestamp}.png"
-                full_path = path + img_name
-                if cv2.imwrite(full_path, frame) == True:
-                    img_count += 1
-                    if (img_count >= num_of_pics):
-                        enrol_aborted = False
-                        break
-                else:
-                    print("Could not write to file")
-
-            cv2.putText(frame, f"Number of Images: {img_count}. Press 'q' to quit early", (10, 20), cv2.FONT_HERSHEY_PLAIN, 1, (0,0,0), 1)
-            cv2.imshow("Enrollment", frame)
-            if key == ord('q'):
-                enrol_aborted = True
-                print('Exiting...')
-                break
-        
-        cap.release()
-        cv2.destroyAllWindows()
-        cv2.waitKey(1)
-        if enrol_aborted:
-            current_state = state[6]
-        else:
-            current_state = state[5]
-        display(curr_state=current_state)
-
+def getUserResponse(errorMsg):
+    if errorMsg:
+        print(f"{RED_TEXT}{errorMsg}{RESET_TEXT}")
     user_input = input('>> ').lower()
-
-    # Sanitize user input
     user_input = user_input.replace(" ", "")
+    return user_input
 
-    if (user_input == 'q' and current_state.find('enrol') == -1):
-        os.system('cls' if os.name == 'nt' else 'clear')
-        break
-    elif (user_input == 'menu'):
-        current_state = state[0]
-    elif (user_input == 'help'):
-        current_state = state[1]
-    elif (user_input == 'enrol'):
-        current_state = state[2]
-    elif (current_state.find('enrol') != -1):
-        if (user_input == 'exit'):
-            current_state = state[0]
-        elif current_state == state[2] and user_input != 'q':
-            label = user_input
-            current_state = state[3]
-        elif current_state == state[3]:
-            try:
-                num_of_pics = int(user_input)
-                current_state = state[4]
-                num_error = False
-            except ValueError:
-                num_error = True
-        elif current_state == state[6] and user_input == 'again':
-            current_state = state[4]
+def main():
+    # Initialize to begin at the MENU
+    curr_state = States.MENU
+    error = ""
+    path = ""
+    enrolled_label = ""
+    enrolling = False
+    num_of_pics = 0
 
-    else:
-        print("Invalid command... try entering 'help' to see list of commands.")
+    while True:
 
+        # Handle start of the ENROL states
+        if curr_state == States.ENROL_START:
+            curr_state = States.ENROL_GET_NAME
+            enrolling = True
+            continue
+
+        displayText(curr_state)
+        user_res = getUserResponse(errorMsg=error)
+
+        error = ""
+
+        # Handle Enrolling states
+        if enrolling == True:
+            if user_res == 'exit':
+                curr_state = States.MENU
+                enrolling = False
+                continue
+            
+            # Handle States
+            if curr_state == States.ENROL_GET_NAME:
+                if user_res == 'q':
+                    error = "Enter a name for the person you want to enrol."
+                else:
+                    enrolled_label = user_res
+                    path = f'../enrollments/{enrolled_label}/'
+                    if not os.path.exists(path):
+                        os.makedirs(path)
+                        curr_state = States.ENROL_GET_NUM_OF_PICS
+                    else:
+                        curr_state = States.ENROL_DUPLICATE_PEOPLE
+            elif curr_state == States.ENROL_DUPLICATE_PEOPLE:
+                if user_res == 'a':
+                    # Delete the directory
+                    shutil.rmtree(path)
+
+                    # Re-create it
+                    os.makedirs(path)
+                curr_state = States.ENROL_GET_NUM_OF_PICS
+            elif curr_state == States.ENROL_GET_NUM_OF_PICS:
+                try:
+                    num_of_pics = int(user_res)
+                    curr_state = States.ENROL_TAKE_PICS
+                except ValueError:
+                    error = "Invalid input. Please enter an integer number"
+            elif curr_state == States.ENROL_TAKE_PICS:
+                count = 0
+                cap = cv2.VideoCapture(0)
+
+                if not cap.isOpened():
+                    error = "Could not open webcam. Exited to main menu"
+                    curr_state = States.MENU
+                    continue
+                
+                while True:
+                    ret, frame = cv2.read()
+                    if not ret:
+                        print("Failed to grab frame... Exiting")
+                        break
+                    
+                    key = cv2.waitKey(1) & 0xFF
+
+                    if key == ord('s') and count < num_of_pics:
+                        timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
+                        img_name = f"{enrolled_label}_{count}_{timestamp}.jpg"
+                        full_path = path + img_name
+                        if cv2.imwrite(full_path, frame):
+                            count += 1
+                            if count >= num_of_pics:
+                                curr_state = States.ENROL_COMPLETE
+                                break
+                        else:
+                            print("Failed to write to disk")
+
+                    cv2.putText(frame, f"Number of Images: {count}. Press 'q' to quit early", (10, 20), cv2.FONT_HERSHEY_PLAIN, 1, (0,0,0), 1)
+                    cv2.imshow("Take Photo", frame)
+
+                    if key == ord('q') and count < num_of_pics:
+                        curr_state = States.ENROL_ABORT
+                        break
+                
+                cap.release()
+                cv2.destroyAllWindows()
+
+
+            continue
+
+        # Handle user input
+        if user_res == 'q':
+            # Only exit the program if we are not in enrol/delete states
+            if curr_state == States.MENU or curr_state == States.HELP:
+                break
+            else:
+                continue
+        elif user_res == 'help':
+            curr_state = States.HELP
+        elif user_res == 'menu':
+            curr_state = States.MENU
+        elif user_res == 'enrol':
+            curr_state = States.ENROL_START
+            path = ""
+        else:
+            error = "Invalid Command. Go to 'help' to see list of commands"
+            continue
+
+main()
