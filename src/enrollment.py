@@ -3,6 +3,7 @@ import shutil
 import cv2
 import datetime
 from enum import Enum, auto
+import math
 
 # States for the state machine
 class States(Enum):
@@ -31,10 +32,18 @@ ENROL_STATES = {
     States.ENROL_ABORT,
 }
 
+DELETE_STATES = {
+    States.DELETE_START,
+    States.DELETE_CHOOSE_ENROLLED,
+    States.DELETE_CONFIRM,
+    States.DELETE_COMPLETE,
+    States.DELETE_ABORT
+}
+
 RED_TEXT = '\033[91m'
 RESET_TEXT = '\033[0m'
 
-def displayText(state):
+def displayText(state, enrol_list=[], page_num=0):
     # Clear the terminal
     os.system('cls' if os.name == 'nt' else 'clear')
     if state == States.MENU:
@@ -72,6 +81,25 @@ def displayText(state):
         print("Do you want to resume or exit?")
         print("[a] — Resume")
         print("[b] — Exit")
+    elif state == States.DELETE_CHOOSE_ENROLLED:
+        print("————— Choose an Enrolment to delete —————")
+        print("Enter 'exit' to return to main menu")
+        if len(enrol_list) > 0:
+            # Pagination logic
+            result_per_page = 5
+            offset = page_num * result_per_page
+            sub_list = []
+            if (len(enrol_list) - offset) > 5:
+                sub_list = enrol_list[offset:offset+5]
+            else:
+                sub_list = enrol_list[offset:]
+
+            for i in range(len(sub_list)):
+                print(f"[{i + offset}] — {sub_list[i]}")
+        else:
+            print("No enrolled person. Enrol someone first!")
+            print("Enter 'exit' to return to main menu")
+
 
 def getUserResponse(errorMsg):
     if errorMsg:
@@ -84,10 +112,16 @@ def main():
     # Initialize to begin at the MENU
     curr_state = States.MENU
     error = ""
+
+    # For Enrollments
     path = ""
     enrolled_label = ""
     num_of_pics = 0
     saved_count = 0
+
+    # For Deletion
+    enrol_list = []
+    page_num = 0
 
     while True:
 
@@ -137,11 +171,15 @@ def main():
             cv2.destroyAllWindows()
             cv2.waitKey(1)
             continue
+        elif curr_state == States.DELETE_START:
+            curr_state = States.DELETE_CHOOSE_ENROLLED
+            continue
 
-        displayText(curr_state)
+        displayText(curr_state, enrol_list=enrol_list, page_num=0)
         user_res = getUserResponse(errorMsg=error)
 
         error = ""
+        enrol_list = []
 
         # Handle Enrolling states
         if curr_state in ENROL_STATES:
@@ -195,6 +233,13 @@ def main():
                 else:
                     curr_state = States.MENU
             continue
+        
+        if curr_state in DELETE_STATES:
+            enrol_list = os.listdir('../enrollments')
+
+            if user_res == 'exit':
+                curr_state = States.MENU
+                continue
 
         # Handle user input
         if user_res == 'q':
@@ -215,6 +260,9 @@ def main():
             enrolled_label = ""
             saved_count = 0
             num_of_pics = 0
+        elif user_res == 'delete':
+            curr_state = States.DELETE_START
+            enrol_list = os.listdir('../enrollments')
         else:
             error = "Invalid Command. Go to 'help' to see list of commands"
             continue
