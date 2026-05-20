@@ -43,6 +43,8 @@ DELETE_STATES = {
 RED_TEXT = '\033[91m'
 RESET_TEXT = '\033[0m'
 
+PER_PAGES = 5
+
 def displayText(state, enrol_list=[], page_num=0):
     # Clear the terminal
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -86,7 +88,7 @@ def displayText(state, enrol_list=[], page_num=0):
         print("Enter 'exit' to return to main menu")
         if len(enrol_list) > 0:
             # Pagination logic
-            result_per_page = 5
+            result_per_page = PER_PAGES
             offset = page_num * result_per_page
             sub_list = []
             if (len(enrol_list) - offset) > 5:
@@ -96,6 +98,7 @@ def displayText(state, enrol_list=[], page_num=0):
 
             for i in range(len(sub_list)):
                 print(f"[{i + offset}] — {sub_list[i]}")
+            print("————— [n/p] — next/prev —————")
         else:
             print("No enrolled person. Enrol someone first!")
             print("Enter 'exit' to return to main menu")
@@ -175,11 +178,10 @@ def main():
             curr_state = States.DELETE_CHOOSE_ENROLLED
             continue
 
-        displayText(curr_state, enrol_list=enrol_list, page_num=0)
+        displayText(curr_state, enrol_list=enrol_list, page_num=page_num)
         user_res = getUserResponse(errorMsg=error)
 
         error = ""
-        enrol_list = []
 
         # Handle Enrolling states
         if curr_state in ENROL_STATES:
@@ -201,8 +203,8 @@ def main():
                         curr_state = States.ENROL_DUPLICATE_PEOPLE
             elif curr_state == States.ENROL_DUPLICATE_PEOPLE:
                 if user_res == 'a':
-                    # Delete the directory
                     try:
+                        # Delete the directory
                         shutil.rmtree(path)
 
                         # Re-create it
@@ -240,6 +242,16 @@ def main():
             if user_res == 'exit':
                 curr_state = States.MENU
                 continue
+            elif curr_state == States.DELETE_CHOOSE_ENROLLED:
+                max_num_pages = math.ceil(len(enrol_list) / PER_PAGES) - 1
+                if user_res == 'n':
+                    if page_num >= 0 and page_num < max_num_pages:
+                        page_num += 1
+                elif user_res == 'p':
+                    if page_num > 0 and page_num <= max_num_pages:
+                        page_num -= 1
+            
+            continue
 
         # Handle user input
         if user_res == 'q':
@@ -263,6 +275,7 @@ def main():
         elif user_res == 'delete':
             curr_state = States.DELETE_START
             enrol_list = os.listdir('../enrollments')
+            page_num = 0
         else:
             error = "Invalid Command. Go to 'help' to see list of commands"
             continue
