@@ -99,9 +99,18 @@ def displayText(state, enrol_list=[], page_num=0):
             for i in range(len(sub_list)):
                 print(f"[{i + offset}] — {sub_list[i]}")
             print("————— [n/p] — next/prev —————")
-        else:
-            print("No enrolled person. Enrol someone first!")
-            print("Enter 'exit' to return to main menu")
+    elif state == States.DELETE_CONFIRM:
+        print("————— Are you sure? —————")
+        print("[y/n] — yes/no")
+    elif state == States.DELETE_COMPLETE:
+        print("————— Successfully Deleted! —————")
+        print("Enter 'exit' to return to main menu")
+    elif state == States.DELETE_ABORT:
+        print("————— Delete aborted! —————")
+        print("Enter 'exit' to return to main menu")
+    else:
+        print("No enrolled person. Enrol someone first!")
+        print("Enter 'exit' to return to main menu")
 
 
 def getUserResponse(errorMsg):
@@ -125,6 +134,7 @@ def main():
     # For Deletion
     enrol_list = []
     page_num = 0
+    chosen_enrolled = ""
 
     while True:
 
@@ -238,8 +248,9 @@ def main():
         
         if curr_state in DELETE_STATES:
             enrol_list = os.listdir('../enrollments')
-
-            if user_res == 'exit':
+            if user_res == 'q':
+                error = "Enter 'exit' instead"
+            elif user_res == 'exit':
                 curr_state = States.MENU
                 continue
             elif curr_state == States.DELETE_CHOOSE_ENROLLED:
@@ -250,7 +261,28 @@ def main():
                 elif user_res == 'p':
                     if page_num > 0 and page_num <= max_num_pages:
                         page_num -= 1
-            
+                else:
+                    try:
+                        index = int(user_res);
+                        if index >= 0 and index <= len(enrol_list):
+                            chosen_enrolled = enrol_list[index]
+                            curr_state = States.DELETE_CONFIRM
+                        else:
+                            error = "Input is out of range. Choose from the provided list"
+                    except ValueError:
+                        error = "Input isn't an integer value."
+            elif curr_state == States.DELETE_CONFIRM:
+                if user_res == 'y':
+                    if not os.path.exists(f'../enrollments/{chosen_enrolled}'):
+                        error = "Error: path to enrolled person doesn't exist"
+                        curr_state = States.DELETE_ABORT
+                    else:
+                        shutil.rmtree(f'../enrollments/{chosen_enrolled}')
+                        curr_state = States.DELETE_COMPLETE
+                elif user_res == 'n':
+                    curr_state = States.DELETE_ABORT
+                else:
+                    error = "Invalid command. Enter either 'n' or 'y'"            
             continue
 
         # Handle user input
