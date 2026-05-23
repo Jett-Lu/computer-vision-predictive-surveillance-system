@@ -1,3 +1,4 @@
+# Enrollment
 import os
 import shutil
 import cv2
@@ -21,6 +22,7 @@ class States(Enum):
     DELETE_CONFIRM = auto()
     DELETE_COMPLETE = auto()
     DELETE_ABORT = auto()
+    DETECTION_START = auto()  # NEW
 
 ENROL_STATES = {
     States.ENROL_START,
@@ -64,6 +66,7 @@ def displayText(state, enrol_list=[], page_num=0):
         print("[menu] — Go back to the main menu")
         print("[enrol] — Enrol a person into the database")
         print("[delete] — Delete a currently enrolled person")
+        print("[detect] — Start live face recognition")  # NEW LINE
     elif state == States.ENROL_GET_NAME:
         print("————— Enter a name for the enrolled person —————")
         print("Enter 'exit' to abort enrolling")
@@ -187,6 +190,14 @@ def main():
         elif curr_state == States.DELETE_START:
             curr_state = States.DELETE_CHOOSE_ENROLLED
             continue
+        elif curr_state == States.DETECTION_START:  # NEW BLOCK
+            # Imported locally rather than at the top of the file so that loading
+            # YOLO and face_recognition only happens when the user actually runs detection.
+            # Keeps the menu's startup fast.
+            from detection import run_detection
+            run_detection()
+            curr_state = States.MENU
+            continue
 
         displayText(curr_state, enrol_list=enrol_list, page_num=page_num)
         user_res = getUserResponse(errorMsg=error)
@@ -308,8 +319,11 @@ def main():
             curr_state = States.DELETE_START
             enrol_list = os.listdir('../enrollments')
             page_num = 0
+        elif user_res == 'detect':  # NEW BLOCK
+            curr_state = States.DETECTION_START
         else:
             error = "Invalid Command. Go to 'help' to see list of commands"
             continue
 
-main()
+if __name__ == "__main__":
+    main()
