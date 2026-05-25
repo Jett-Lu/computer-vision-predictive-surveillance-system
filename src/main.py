@@ -67,6 +67,12 @@ face_results = {}  # {track_id: ((fx1, fy1, fx2, fy2), [(kx, ky), ...])}
 emotion_results = {}  # {track_id: np.ndarray probabilities}
 
 
+def clear_cached_face(track_id: int) -> None:
+    """Remove annotations when a tracked person's face is no longer visible."""
+    face_results.pop(track_id, None)
+    emotion_results.pop(track_id, None)
+
+
 def padded_face_box(
     face_box: tuple[int, int, int, int],
     crop_width: int,
@@ -137,6 +143,7 @@ while True:
             detection_result = face_detector.detect(mp_image)
 
             if not detection_result.detections:
+                clear_cached_face(track_id)
                 continue
 
             # If multiple faces appear inside the person crop, use the largest one
@@ -152,6 +159,7 @@ while True:
             fy2 = min(crop_h, bbox.origin_y + bbox.height)
 
             if fx2 <= fx1 or fy2 <= fy1:
+                clear_cached_face(track_id)
                 continue
 
             keypoints = [
@@ -163,6 +171,7 @@ while True:
             ex1, ey1, ex2, ey2 = padded_face_box((fx1, fy1, fx2, fy2), crop_w, crop_h)
             face_rgb = crop_rgb[ey1:ey2, ex1:ex2]
             if face_rgb.size == 0:
+                clear_cached_face(track_id)
                 continue
 
             _, emotion_scores = emotion_recognizer.predict_emotions(face_rgb, logits=False)
