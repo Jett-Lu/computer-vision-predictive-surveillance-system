@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
@@ -20,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "data" / "movenet_singlepose_lightning.tflite"
 MOVENET_INPUT_SIZE = 192
 MIN_KEYPOINT_SCORE = 0.3
+DEFAULT_SKELETON_COLOR = (0, 255, 0)
 
 
 class MoveNetKeypoint(IntEnum):
@@ -62,8 +64,14 @@ MOVENET_CONNECTIONS = (
 )
 
 
+@dataclass(frozen=True)
+class PoseResult:
+    landmarks: dict[int, tuple[float, float]]
+    person_detected: bool
+
+
 class PoseAnalyzer:
-    """MoveNet Lightning skeleton rendering for one visible person."""
+    """MoveNet Lightning pose inference and overlay rendering for one person."""
 
     def __init__(self, model_path: Path) -> None:
         if not model_path.exists():
@@ -74,14 +82,47 @@ class PoseAnalyzer:
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
 
-    def analyze(self, frame: np.ndarray) -> np.ndarray:
+    def analyze(self, frame: np.ndarray) -> PoseResult:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         keypoints = self._infer_keypoints(rgb)
         landmarks = self._visible_landmarks(keypoints)
+        return PoseResult(
+            landmarks=landmarks,
+            person_detected=bool(landmarks),
+        )
 
+    def render(
+        self,
+        frame: np.ndarray,
+        landmarks: dict[int, tuple[float, float]],
+        color: tuple[int, int, int] = DEFAULT_SKELETON_COLOR,
+    ) -> np.ndarray:
         annotated = frame.copy()
-        self._draw_landmarks(annotated, landmarks)
+        self._draw_landmarks(annotated, landmarks, color)
         return annotated
+
+    def person_box(
+        self,
+        landmarks: dict[int, tuple[float, float]],
+        frame: np.ndarray,
+        padding_ratio: float = 0.08,
+    ) -> tuple[int, int, int, int] | None:
+        if not landmarks:
+            return None
+
+        height, width = frame.shape[:2]
+        xs = [point[0] for point in landmarks.values()]
+        ys = [point[1] for point in landmarks.values()]
+        left = max(0.0, min(xs) - padding_ratio)
+        top = max(0.0, min(ys) - padding_ratio)
+        right = min(1.0, max(xs) + padding_ratio)
+        bottom = min(1.0, max(ys) + padding_ratio)
+        return (
+            int(left * width),
+            int(top * height),
+            int(right * width),
+            int(bottom * height),
+        )
 
     def _infer_keypoints(self, frame: np.ndarray) -> np.ndarray:
         model_input, scale, pad_x, pad_y = self._prepare_input(frame)
@@ -128,6 +169,7 @@ class PoseAnalyzer:
         self,
         frame: np.ndarray,
         landmarks: dict[int, tuple[float, float]],
+        color: tuple[int, int, int] = DEFAULT_SKELETON_COLOR,
     ) -> None:
         height, width = frame.shape[:2]
         points = {
@@ -137,7 +179,7 @@ class PoseAnalyzer:
 
         for start, end in MOVENET_CONNECTIONS:
             if start in points and end in points:
-                cv2.line(frame, points[start], points[end], (255, 180, 0), 2)
+                cv2.line(frame, points[start], points[end], color, 2)
 
         for point in points.values():
-            cv2.circle(frame, point, 4, (80, 220, 255), -1)
+            cv2.circle(frame, point, 4, color, -1)
