@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 
-from gesture import GREEN, WaveAlertState
+from gesture import WaveAlertState
 
 
+CLEAR_COLOR = (0, 255, 0)
+MONITOR_COLOR = (0, 255, 255)
+REVIEW_COLOR = (0, 165, 255)
+HIGH_COLOR = (0, 0, 255)
 CONCERN_EXPRESSIONS = frozenset(
     {
         "Anger",
@@ -21,99 +24,82 @@ CONCERN_EXPRESSIONS = frozenset(
 class ReviewState:
     tier_label: str
     color: tuple[int, int, int]
-    score: int
+    score: float
     recent_wave_count: int
-    recent_expression_event_count: int
-    expression_points: int
+    expression_multiplier: float
+    concern_strength: float
+    concern_label: str | None
+
+    @property
+    def concern_expression_active(self) -> bool:
+        return self.concern_strength > 0.0
 
 
 @dataclass
 class ReviewLevelMonitor:
-    """Combine repeated behavior and sustained expression cues for on-screen review."""
+    """Apply a visible, bounded emotion modifier to repeated activity."""
 
-    expression_window_seconds: float = 30.0
-    required_concern_seconds: float = 1.5
-    expression_event_cooldown_seconds: float = 4.0
-    confidence_threshold: float = 0.55
-    expression_allowance: int = 1
-    max_expression_points: int = 2
-    high_score: int = 5
-    _expression_events: deque[float] = field(default_factory=deque, init=False)
-    _concern_start_time: float | None = field(default=None, init=False)
-    _last_expression_event_time: float | None = field(default=None, init=False)
+    wave_allowance: int = 2
+    concern_smoothing_alpha: float = 0.35
+    max_multiplier_increase: float = 0.50
+    _concern_strength: float = field(default=0.0, init=False)
+    _concern_label: str | None = field(default=None, init=False)
 
     def observe_expression(
         self,
         label: str | None,
         confidence: float | None,
-        timestamp: float,
+        timestamp: float | None = None,
     ) -> bool:
-        """Record qualifying sustained expression cues; return true when one is counted."""
-        self._discard_expired_expression_events(timestamp)
+        """Update the live concern signal and report when it first becomes visible."""
+        previously_active = self._concern_strength > 0.0
 
-        concerning = (
-            label in CONCERN_EXPRESSIONS
-            and confidence is not None
-            and confidence >= self.confidence_threshold
-        )
-        if not concerning:
-            self._concern_start_time = None
+        if label is None or confidence is None:
+            self._concern_strength = 0.0
+            self._concern_label = None
             return False
 
-        if self._concern_start_time is None:
-            self._concern_start_time = timestamp
-            return False
-
-        duration_met = (
-            timestamp - self._concern_start_time >= self.required_concern_seconds
+        target_strength = float(confidence) if label in CONCERN_EXPRESSIONS else 0.0
+        self._concern_strength = (
+            self.concern_smoothing_alpha * target_strength
+            + (1.0 - self.concern_smoothing_alpha) * self._concern_strength
         )
-        cooled_down = self._last_expression_event_time is None or (
-            timestamp - self._last_expression_event_time
-            >= self.expression_event_cooldown_seconds
-        )
-        if duration_met and cooled_down:
-            self._expression_events.append(timestamp)
-            self._last_expression_event_time = timestamp
-            return True
+        if target_strength > 0:
+            self._concern_label = label
+        elif self._concern_strength < 0.01:
+            self._concern_strength = 0.0
+            self._concern_label = None
 
-        return False
+        return self._concern_strength > 0.0 and not previously_active
 
-    def update(self, wave_state: WaveAlertState, timestamp: float) -> ReviewState:
-        self._discard_expired_expression_events(timestamp)
-
-        wave_points = max(0, wave_state.recent_wave_count - 2)
-        expression_points = min(
-            max(0, len(self._expression_events) - self.expression_allowance),
-            self.max_expression_points,
-        )
-        score = wave_points + expression_points
+    def update(
+        self,
+        wave_state: WaveAlertState,
+        timestamp: float | None = None,
+    ) -> ReviewState:
+        behavior_score = max(0, wave_state.recent_wave_count - self.wave_allowance)
+        multiplier = 1.0 + self.max_multiplier_increase * self._concern_strength
+        score = behavior_score * multiplier
 
         if score == 0:
             tier = "CLEAR"
+            color = CLEAR_COLOR
         elif score <= 2:
             tier = "MONITOR"
+            color = MONITOR_COLOR
         elif score <= 4:
             tier = "REVIEW"
+            color = REVIEW_COLOR
         else:
             tier = "HIGH"
-
-        red_progress = min(score / max(1, self.high_score), 1.0)
-        red = int(round(255 * red_progress))
-        green = int(round(255 * (1.0 - red_progress)))
-        color = (0, green, red) if score else GREEN
+            color = HIGH_COLOR
 
         return ReviewState(
             tier_label=tier,
             color=color,
             score=score,
             recent_wave_count=wave_state.recent_wave_count,
-            recent_expression_event_count=len(self._expression_events),
-            expression_points=expression_points,
+            expression_multiplier=multiplier,
+            concern_strength=self._concern_strength,
+            concern_label=self._concern_label if self._concern_strength > 0.0 else None,
         )
-
-    def _discard_expired_expression_events(self, timestamp: float) -> None:
-        while (
-            self._expression_events
-            and timestamp - self._expression_events[0] > self.expression_window_seconds
-        ):
-            self._expression_events.popleft()

@@ -5,6 +5,11 @@ import cv2
 import datetime
 from enum import Enum, auto
 import math
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENROLLMENTS_DIR = PROJECT_ROOT / "enrollments"
 
 # States for the state machine
 class States(Enum):
@@ -47,18 +52,14 @@ RESET_TEXT = '\033[0m'
 
 PER_PAGES = 5
 
-def displayText(state, enrol_list=[], page_num=0):
+def displayText(state, enrol_list=None, page_num=0):
+    enrol_list = enrol_list or []
     # Clear the terminal
     os.system('cls' if os.name == 'nt' else 'clear')
     if state == States.MENU:
-        print("""
- █████  ███    ██  ██████  ███    ███  █████  ██      ██    ██     ██████  ███████ ████████ ███████  ██████ ████████ ██  ██████  ███    ██ 
-██   ██ ████   ██ ██    ██ ████  ████ ██   ██ ██       ██  ██      ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ████   ██ 
-███████ ██ ██  ██ ██    ██ ██ ████ ██ ███████ ██        ████       ██   ██ █████      ██    █████   ██         ██    ██ ██    ██ ██ ██  ██ 
-██   ██ ██  ██ ██ ██    ██ ██  ██  ██ ██   ██ ██         ██        ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ██  ██ ██ 
-██   ██ ██   ████  ██████  ██      ██ ██   ██ ███████    ██        ██████  ███████    ██    ███████  ██████    ██    ██  ██████  ██   ████
-        """)
-        print("————— Enter 'help' to see options —————")
+        print("\nIntegrated Monitoring Demo")
+        print("==========================")
+        print("Enter 'help' to view available commands.")
     elif state == States.HELP:
         print("————— List of Commands —————")
         print("[q] — Quit the program")
@@ -129,7 +130,7 @@ def main():
     error = ""
 
     # For Enrollments
-    path = ""
+    path: Path | None = None
     enrolled_label = ""
     num_of_pics = 0
     saved_count = 0
@@ -165,8 +166,8 @@ def main():
                 if key == ord('s') and count < num_of_pics:
                     timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
                     img_name = f"{enrolled_label}_{count}_{timestamp}.jpg"
-                    full_path = path + img_name
-                    if cv2.imwrite(full_path, frame):
+                    full_path = path / img_name
+                    if cv2.imwrite(str(full_path), frame):
                         count += 1
                         if count >= num_of_pics:
                             curr_state = States.ENROL_COMPLETE
@@ -216,7 +217,7 @@ def main():
                     error = "Enter a name for the person you want to enrol."
                 else:
                     enrolled_label = user_res
-                    path = f'../enrollments/{enrolled_label}/'
+                    path = ENROLLMENTS_DIR / enrolled_label
                     if not os.path.exists(path):
                         os.makedirs(path)
                         curr_state = States.ENROL_GET_NUM_OF_PICS
@@ -258,7 +259,8 @@ def main():
             continue
         
         if curr_state in DELETE_STATES:
-            enrol_list = os.listdir('../enrollments')
+            ENROLLMENTS_DIR.mkdir(exist_ok=True)
+            enrol_list = os.listdir(ENROLLMENTS_DIR)
             if user_res == 'q':
                 error = "Enter 'exit' instead"
             elif user_res == 'exit':
@@ -284,11 +286,12 @@ def main():
                         error = "Input isn't an integer value."
             elif curr_state == States.DELETE_CONFIRM:
                 if user_res == 'y':
-                    if not os.path.exists(f'../enrollments/{chosen_enrolled}'):
+                    chosen_path = ENROLLMENTS_DIR / chosen_enrolled
+                    if not chosen_path.exists():
                         error = "Error: path to enrolled person doesn't exist"
                         curr_state = States.DELETE_ABORT
                     else:
-                        shutil.rmtree(f'../enrollments/{chosen_enrolled}')
+                        shutil.rmtree(chosen_path)
                         curr_state = States.DELETE_COMPLETE
                 elif user_res == 'n':
                     curr_state = States.DELETE_ABORT
@@ -311,13 +314,14 @@ def main():
             curr_state = States.ENROL_START
 
             # Reset all enrolment related variables
-            path = ""
+            path = None
             enrolled_label = ""
             saved_count = 0
             num_of_pics = 0
         elif user_res == 'delete':
             curr_state = States.DELETE_START
-            enrol_list = os.listdir('../enrollments')
+            ENROLLMENTS_DIR.mkdir(exist_ok=True)
+            enrol_list = os.listdir(ENROLLMENTS_DIR)
             page_num = 0
         elif user_res == 'detect':  # NEW BLOCK
             curr_state = States.DETECTION_START

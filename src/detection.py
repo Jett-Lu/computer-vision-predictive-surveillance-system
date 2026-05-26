@@ -1,14 +1,26 @@
-# Detection
-import cv2
-from ultralytics import YOLO
-import numpy as np
-import face_recognition
+"""Live integrated monitoring with optional enrolled-person identification."""
+
+from pathlib import Path
 import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
 
-ENROLLMENTS_DIR = "../enrollments"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TMP_DIR = PROJECT_ROOT / ".tmp"
+(TMP_DIR / "ultralytics").mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", str(TMP_DIR / "ultralytics"))
+
+import cv2
+import numpy as np
+
+try:
+    import face_recognition
+except ModuleNotFoundError:
+    face_recognition = None
+
+ENROLLMENTS_DIR = PROJECT_ROOT / "enrollments"
+PERSON_MODEL_PATH = PROJECT_ROOT / "data" / "yolov8n.pt"
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 
 # Tolerance for the smallest face_distance to count as a match.
@@ -16,42 +28,14 @@ IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 # the actual distances you get for "same person" vs "different person".
 TOLERANCE = 0.6
 
-# Downscale factor for face detection. HOG cost scales roughly with pixel area,
-# so 2x downscale ~= 4x speedup. Coordinates are scaled back up before drawing
-# on the full-resolution frame. Increase to push speed further at the cost of
-# missing smaller faces; decrease (down to 1, i.e. no downscale) for accuracy.
+# Performance tuning controls for the live camera loop.
 FACE_DETECT_DOWNSCALE = 2
-
-# Run YOLO tracking every Nth frame, reuse boxes between. ByteTrack handles
-# this gracefully because tracking is designed to be robust to occasional
-# update gaps. Tradeoff: between updates, box coordinates lag behind motion.
-# Tune higher for more speed, lower for more responsive bounding boxes.
 YOLO_INTERVAL_FRAMES = 2
-
-# Toggle timing instrumentation. When False, the timer becomes a no-op with
-# negligible overhead — the `with timer(...)` blocks throughout run_detection
-# remain in place but do nothing. Flip to True to diagnose performance.
 DEBUG_TIMING = False
 
 
 class StageTimer:
-    """Accumulate per-stage durations across frames and print periodically.
-
-    Designed to be easy to add/remove without restructuring the loop:
-    just wrap stages in `with timer("stage_name"):` and call `timer.tick()`
-    once per frame.
-
-    Output (every print_every frames):
-        --- timing over last 30 frames ---
-          face_recog_loop       45.2 ms  (30 calls)
-          yolo_track            28.7 ms  (30 calls)
-          ...
-          -- sum: 103.6 ms/frame (~9.6 FPS upper bound)
-
-    Stages are sorted by average ms descending so the bottleneck is at the top.
-    Note: stages that don't run every frame (throttled or skipped) report
-    fewer calls; the per-frame impact in the FPS sum is correctly weighted.
-    """
+    """Accumulate and periodically report per-stage frame processing time."""
 
     def __init__(self, print_every: int = 30):
         self.print_every = print_every
@@ -65,50 +49,39 @@ class StageTimer:
         try:
             yield
         finally:
-            elapsed = time.perf_counter() - start
-            self._totals[stage_name] += elapsed
+            self._totals[stage_name] += time.perf_counter() - start
             self._counts[stage_name] += 1
 
     def tick(self):
-        """Call once per frame. Prints aggregated averages every print_every frames."""
+        """Print timing averages after each measurement window."""
         self._frames += 1
         if self._frames % self.print_every != 0:
             return
 
         lines = [f"\n--- timing over last {self.print_every} frames ---"]
-        rows = []
-        for stage, total in self._totals.items():
-            avg_ms_per_call = (total / self._counts[stage]) * 1000
-            rows.append((stage, avg_ms_per_call, self._counts[stage]))
-        rows.sort(key=lambda r: r[1], reverse=True)
-        for stage, avg_ms_per_call, calls in rows:
-            lines.append(f"  {stage:<20} {avg_ms_per_call:6.1f} ms  ({calls} calls)")
+        rows = [
+            (stage, (total / self._counts[stage]) * 1000, self._counts[stage])
+            for stage, total in self._totals.items()
+        ]
+        rows.sort(key=lambda row: row[1], reverse=True)
+        for stage, average_ms, calls in rows:
+            lines.append(f"  {stage:<20} {average_ms:6.1f} ms  ({calls} calls)")
 
-        # Per-frame impact = total stage time / frames in this window.
-        # This correctly accounts for stages that don't run every frame
-        # (throttled stages contribute less to per-frame cost).
         per_frame_total_ms = sum(
-            total * 1000 / self.print_every
-            for total in self._totals.values()
+            total * 1000 / self.print_every for total in self._totals.values()
         )
         if per_frame_total_ms > 0:
-            implied_fps = 1000 / per_frame_total_ms
             lines.append(
                 f"  -- sum: {per_frame_total_ms:.1f} ms/frame "
-                f"(~{implied_fps:.1f} FPS upper bound)"
+                f"(~{1000 / per_frame_total_ms:.1f} FPS upper bound)"
             )
         print("\n".join(lines))
-
         self._totals.clear()
         self._counts.clear()
 
 
 class NoOpTimer:
-    """Drop-in replacement for StageTimer with zero measurement overhead.
-
-    Implements the same interface (callable context manager + tick method)
-    so the surrounding code is identical whether timing is enabled or not.
-    """
+    """Timer-compatible context manager used when diagnostics are disabled."""
 
     @contextmanager
     def __call__(self, stage_name: str):
@@ -119,41 +92,55 @@ class NoOpTimer:
 
 
 def load_known_encodings():
-    """Walk the enrollments directory and build parallel name/encoding lists."""
-    if not os.path.exists(ENROLLMENTS_DIR):
-        raise RuntimeError("Error: enrollments directory doesn't exist")
+    """Walk the enrollments directory and build parallel name/encoding lists.
+
+    Returns:
+        (known_faces, known_encodings) — two parallel lists. By construction,
+        len(known_faces) == len(known_encodings) and index i in both refers to
+        the same enrolled photo.
+    """
+    if face_recognition is None or not ENROLLMENTS_DIR.exists():
+        return [], []
 
     known_faces = []
     known_encodings = []
 
-    for root, dirs, files in os.walk(ENROLLMENTS_DIR):
-        if root == ENROLLMENTS_DIR:
+    for root, _, files in os.walk(ENROLLMENTS_DIR):
+        # Skip the top-level enrollments/ directory itself — only process person subfolders.
+        if Path(root) == ENROLLMENTS_DIR:
             continue
 
+        # The person's name is the folder name, not parsed from filenames.
         person_name = os.path.basename(root)
 
         for filename in files:
+            # Filter to image files only — skips .DS_Store and any other stray files.
             if not filename.lower().endswith(IMAGE_EXTENSIONS):
                 continue
 
             full_path = os.path.join(root, filename)
 
+            # cv2.imread returns None on failure (corrupt file, unsupported format, etc.)
+            # rather than raising. Must be checked before use.
             img = cv2.imread(full_path)
             if img is None:
                 print(f"Warning: could not read {full_path}, skipping")
                 continue
 
+            # face_recognition expects RGB; OpenCV loads as BGR.
             corrected = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # face_encodings returns a list — empty if no face was detected.
             encodings = face_recognition.face_encodings(corrected)
             if len(encodings) == 0:
                 print(f"Warning: no face found in {full_path}, skipping")
                 continue
 
+            # Append to BOTH lists together — invariant that prevents desync.
             known_encodings.append(encodings[0])
             known_faces.append(person_name)
 
     return known_faces, known_encodings
-
 
 def _face_centre_inside_box(face_box, person_box):
     """Return True if the centre of face_box falls inside person_box.
@@ -174,28 +161,23 @@ def _face_centre_inside_box(face_box, person_box):
 def run_detection():
     """Run live face recognition combined with pose, gesture, and emotion analysis."""
     print("Loading enrolments...")
-    try:
-        known_faces, known_encodings = load_known_encodings()
-    except RuntimeError as e:
-        print(e)
-        input("Press Enter to return to menu...")
-        return
-
-    if len(known_encodings) == 0:
-        print("No enrolled faces found. Enrol someone first.")
-        input("Press Enter to return to menu...")
-        return
-
-    print(f"Loaded {len(known_encodings)} encodings for {len(set(known_faces))} people")
+    known_faces, known_encodings = load_known_encodings()
+    if face_recognition is None:
+        print("Identity matching is unavailable. Continuing with anonymous monitoring.")
+    elif len(known_encodings) == 0:
+        print("No enrolled faces found. Continuing with anonymous monitoring.")
+    else:
+        print(f"Loaded {len(known_encodings)} encodings for {len(set(known_faces))} people")
 
     # Imports are local so menu startup doesn't pay these costs.
     from pose import PoseAnalyzer, DEFAULT_MODEL_PATH
     from gesture import RightHandWaveMonitor
     from review import ReviewLevelMonitor
     from emotion import FaceEmotionAnalyzer, FaceEmotionResult
+    from ultralytics import YOLO
 
     print("Loading YOLO, pose, and emotion models...")
-    model = YOLO('../data/yolov8n.pt')
+    model = YOLO(str(PERSON_MODEL_PATH))
     pose_analyzer = PoseAnalyzer(model_path=DEFAULT_MODEL_PATH)
     wave_monitor = RightHandWaveMonitor()
     review_monitor = ReviewLevelMonitor()
@@ -209,11 +191,7 @@ def run_detection():
     EXPRESSION_SCORE_ALPHA = 0.35
     cached_emotion: FaceEmotionResult | None = None
     frame_count = 0
-
-    # Holds the most recent YOLO boxes between throttled updates.
     cached_boxes = None
-
-    # Per-stage timing instrumentation, gated by the DEBUG_TIMING flag.
     timer = StageTimer(print_every=30) if DEBUG_TIMING else NoOpTimer()
 
     cap = cv2.VideoCapture(0)
@@ -271,25 +249,36 @@ def run_detection():
 
             review_state = review_monitor.update(wave_state, timestamp)
 
-            # ===== Pose skeleton rendering =====
+            # Render pose skeleton; review color reflects wave/expression state.
             with timer("render_pose"):
                 annotated = pose_analyzer.render(
                     frame, pose_result.landmarks, review_state.color,
                 )
 
-            # ===== Pose-derived person box + review status overlays =====
+            # ===== Draw pose-derived person box + review status =====
             if person_box_from_pose is not None:
                 px1, py1, px2, py2 = person_box_from_pose
                 cv2.rectangle(annotated, (px1, py1), (px2, py2), review_state.color, 3)
                 status = (
                     f"Review level: {review_state.tier_label} "
                     f"| waves: {review_state.recent_wave_count} "
-                    f"| expression cues: {review_state.recent_expression_event_count}"
+                    f"| modifier: x{review_state.expression_multiplier:.2f}"
                 )
                 cv2.putText(
                     annotated, status,
-                    (px1, max(25, py1 - 12)),
+                    (px1, max(25, py1 - 34)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, review_state.color, 2,
+                )
+                concern_text = "Concern influence: none"
+                if review_state.concern_expression_active:
+                    concern_text = (
+                        f"Concern influence: {review_state.concern_label} "
+                        f"{review_state.concern_strength:.0%}"
+                    )
+                cv2.putText(
+                    annotated, concern_text,
+                    (px1, max(47, py1 - 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, review_state.color, 2,
                 )
                 if wave_state.wave_detected:
                     cv2.putText(
@@ -299,17 +288,15 @@ def run_detection():
                     )
                 elif expression_event_counted:
                     cv2.putText(
-                        annotated, "Sustained concern expression counted",
+                        annotated, "Expression modifier active",
                         (px1, min(frame.shape[0] - 15, py2 + 25)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, review_state.color, 2,
                     )
 
+            # NOTE: Removed — the separate yellow emotion face box and BlazeFace keypoint
+            # circles. The emotion is now drawn on the face-recognition box below.
+
             # ===== YOLO person detection + tracking (throttled) =====
-            # Only run on every Nth frame; reuse the previous boxes between.
-            # Per-track-ID caching downstream means cached boxes incur no
-            # extra recognition cost — names stay attached to their IDs.
-            # The `cached_boxes is None` guard ensures the very first frame
-            # always runs YOLO regardless of the modulo check.
             if frame_count % YOLO_INTERVAL_FRAMES == 0 or cached_boxes is None:
                 with timer("yolo_track"):
                     results = model.track(
@@ -333,44 +320,43 @@ def run_detection():
                     if cropped_img.size == 0:
                         continue
 
-                    # Downscale the person crop before face detection.
-                    # HOG cost scales roughly with pixel area, so this is
-                    # where the face-detection speed win lives.
-                    crop_h, crop_w = cropped_img.shape[:2]
-                    small_w = max(1, crop_w // FACE_DETECT_DOWNSCALE)
-                    small_h = max(1, crop_h // FACE_DETECT_DOWNSCALE)
-                    small_crop = cv2.resize(cropped_img, (small_w, small_h))
+                    if face_recognition is None:
+                        face_box = (x1, y1, x2, y2)
+                        corrected = None
+                        face_locs = None
+                    else:
+                        crop_h, crop_w = cropped_img.shape[:2]
+                        small_crop = cv2.resize(
+                            cropped_img,
+                            (
+                                max(1, crop_w // FACE_DETECT_DOWNSCALE),
+                                max(1, crop_h // FACE_DETECT_DOWNSCALE),
+                            ),
+                        )
+                        corrected = cv2.cvtColor(small_crop, cv2.COLOR_BGR2RGB)
 
-                    # face_recognition expects RGB; OpenCV gives BGR.
-                    corrected = cv2.cvtColor(small_crop, cv2.COLOR_BGR2RGB)
+                        face_locs = face_recognition.face_locations(
+                            corrected, number_of_times_to_upsample=1, model='hog'
+                        )
+                        if len(face_locs) == 0:
+                            continue
 
-                    # Detect on the downscaled crop.
-                    face_locs = face_recognition.face_locations(
-                        corrected, number_of_times_to_upsample=1, model='hog'
-                    )
-                    if len(face_locs) == 0:
-                        continue
+                        top, right, bottom, left = face_locs[0]
+                        face_box = (
+                            left * FACE_DETECT_DOWNSCALE + x1,
+                            top * FACE_DETECT_DOWNSCALE + y1,
+                            right * FACE_DETECT_DOWNSCALE + x1,
+                            bottom * FACE_DETECT_DOWNSCALE + y1,
+                        )
 
-                    # Scale face_locs coordinates back up to original crop space,
-                    # then offset to full-frame coordinates for drawing.
-                    # face_locations returns (top, right, bottom, left).
-                    top, right, bottom, left = face_locs[0]
-                    top *= FACE_DETECT_DOWNSCALE
-                    right *= FACE_DETECT_DOWNSCALE
-                    bottom *= FACE_DETECT_DOWNSCALE
-                    left *= FACE_DETECT_DOWNSCALE
+                    face_x1, face_y1, face_x2, face_y2 = face_box
 
-                    face_x1 = left + x1
-                    face_y1 = top + y1
-                    face_x2 = right + x1
-                    face_y2 = bottom + y1
-
-                    # Recognise (with caching by track ID).
-                    if track_id is not None and track_id in track_id_to_name:
+                    # Recognise only when identities have been enrolled.
+                    if not known_encodings or face_recognition is None:
+                        name = "Person"
+                    elif track_id is not None and track_id in track_id_to_name:
                         name = track_id_to_name[track_id]
                     else:
-                        # face_encodings must use the same image and coordinates
-                        # that face_locations produced — both at downscaled resolution.
                         face_encs = face_recognition.face_encodings(
                             corrected, face_locs, num_jitters=1, model='small'
                         )
@@ -391,22 +377,44 @@ def run_detection():
                                 track_id_to_name[track_id] = name
 
                     # Attach emotion to the face that matches pose's person.
-                    face_box = (face_x1, face_y1, face_x2, face_y2)
+                    follows_pose_subject = _face_centre_inside_box(
+                        face_box,
+                        person_box_from_pose,
+                    )
                     if (
-                        cached_emotion is not None
-                        and _face_centre_inside_box(face_box, person_box_from_pose)
+                        face_recognition is None
+                        and cached_emotion is not None
+                        and follows_pose_subject
                     ):
-                        label_text = f"{name} | {cached_emotion.label} {cached_emotion.confidence:.2f}"
+                        face_box = cached_emotion.box
+                        face_x1, face_y1, face_x2, face_y2 = face_box
+                    if cached_emotion is not None and follows_pose_subject:
+                        label_text = (
+                            f"{name} | {cached_emotion.label} "
+                            f"{cached_emotion.confidence:.2f}"
+                        )
                     else:
                         label_text = name
 
-                    # Draw face box + combined label on the full-resolution frame.
-                    cv2.rectangle(annotated, (face_x1, face_y1), (face_x2, face_y2), (0, 0, 255), 2)
-                    cv2.rectangle(annotated, (face_x1, face_y2 - 30), (face_x2, face_y2), (0, 0, 255), cv2.FILLED)
-                    cv2.putText(annotated, label_text, (face_x1 + 6, face_y2 - 8),
-                                cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+                    box_color = review_state.color if follows_pose_subject else (0, 255, 0)
+                    cv2.rectangle(annotated, (face_x1, face_y1), (face_x2, face_y2), box_color, 2)
+                    cv2.rectangle(
+                        annotated,
+                        (face_x1, face_y2 - 30),
+                        (face_x2, face_y2),
+                        box_color,
+                        cv2.FILLED,
+                    )
+                    cv2.putText(
+                        annotated,
+                        label_text,
+                        (face_x1 + 6, face_y2 - 8),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        1,
+                    )
 
-            # ===== Display + frame bookkeeping =====
             with timer("display"):
                 cv2.imshow('Face Recognition + Pose/Emotion', annotated)
                 frame_count += 1
@@ -415,15 +423,12 @@ def run_detection():
                     print("Exiting detection.")
                     break
 
-            # Report averaged timings every print_every frames (no-op when timing disabled).
             timer.tick()
-
     finally:
         cap.release()
         emotion_analyzer.close()
         cv2.destroyAllWindows()
         cv2.waitKey(1)
-
 
 if __name__ == "__main__":
     run_detection()
