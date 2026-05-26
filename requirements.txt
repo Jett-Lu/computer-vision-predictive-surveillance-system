@@ -1,13 +1,10 @@
-<<<<<<< HEAD
 opencv-contrib-python>=4.9.0
 numpy>=1.26.0
-tensorflow>=2.17.0
+tensorflow
 mediapipe>=0.10.0
 emotiefflib>=1.1.1
 
-=======
 ultralytics
 # mediapipe
 face-recognition
 datetime
->>>>>>> facial-recognition

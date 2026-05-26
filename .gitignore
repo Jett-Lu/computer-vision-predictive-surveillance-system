@@ -1,12 +1,5 @@
-<<<<<<< HEAD
 # Python
 __pycache__/
 .venv/
 .tmp/
-
-=======
-.venv
-.tmp
-__pycache__
 enrollments/
->>>>>>> facial-recognition
