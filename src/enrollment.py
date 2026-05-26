@@ -57,8 +57,13 @@ def displayText(state, enrol_list=None, page_num=0):
     # Clear the terminal
     os.system('cls' if os.name == 'nt' else 'clear')
     if state == States.MENU:
-        print("\nIntegrated Monitoring Demo")
-        print("==========================")
+        print("""
+ █████  ███    ██  ██████  ███    ███  █████  ██      ██    ██     ██████  ███████ ████████ ███████  ██████ ████████ ██  ██████  ███    ██ 
+██   ██ ████   ██ ██    ██ ████  ████ ██   ██ ██       ██  ██      ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ████   ██ 
+███████ ██ ██  ██ ██    ██ ██ ████ ██ ███████ ██        ████       ██   ██ █████      ██    █████   ██         ██    ██ ██    ██ ██ ██  ██ 
+██   ██ ██  ██ ██ ██    ██ ██  ██  ██ ██   ██ ██         ██        ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ██  ██ ██ 
+██   ██ ██   ████  ██████  ██      ██ ██   ██ ███████    ██        ██████  ███████    ██    ███████  ██████    ██    ██  ██████  ██   ████
+              """)
         print("Enter 'help' to view available commands.")
     elif state == States.HELP:
         print("————— List of Commands —————")
