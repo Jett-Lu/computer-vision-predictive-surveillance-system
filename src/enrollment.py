@@ -1,338 +1,356 @@
-# Enrollment
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum, auto
+from pathlib import Path
+import datetime
+import math
 import os
 import shutil
+
 import cv2
-import datetime
-from enum import Enum, auto
-import math
-from pathlib import Path
+
+from camera import open_capture, prompt_camera_source
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENROLLMENTS_DIR = PROJECT_ROOT / "enrollments"
+PAGE_SIZE = 5
+INVALID_LABEL_CHARS = set('<>:"/\\|?*')
+RED_TEXT = "\033[91m"
+RESET_TEXT = "\033[0m"
 
-# States for the state machine
-class States(Enum):
+
+class MenuState(Enum):
     MENU = auto()
     HELP = auto()
-    ENROL_START = auto()
-    ENROL_GET_NAME = auto()
-    ENROL_DUPLICATE_PEOPLE = auto()
-    ENROL_GET_NUM_OF_PICS = auto()
-    ENROL_TAKE_PICS = auto()
-    ENROL_COMPLETE = auto()
-    ENROL_ABORT = auto()
-    DELETE_START = auto()
-    DELETE_CHOOSE_ENROLLED = auto()
+    ENROLL_GET_NAME = auto()
+    ENROLL_DUPLICATE = auto()
+    ENROLL_GET_COUNT = auto()
+    ENROLL_CAPTURE = auto()
+    ENROLL_COMPLETE = auto()
+    ENROLL_ABORT = auto()
+    DELETE_CHOOSE = auto()
     DELETE_CONFIRM = auto()
     DELETE_COMPLETE = auto()
     DELETE_ABORT = auto()
-    DETECTION_START = auto()  # NEW
+    DETECT = auto()
 
-ENROL_STATES = {
-    States.ENROL_START,
-    States.ENROL_GET_NAME,
-    States.ENROL_DUPLICATE_PEOPLE,
-    States.ENROL_GET_NUM_OF_PICS,
-    States.ENROL_TAKE_PICS,
-    States.ENROL_COMPLETE,
-    States.ENROL_ABORT,
+
+ENROLLMENT_STATES = {
+    MenuState.ENROLL_GET_NAME,
+    MenuState.ENROLL_DUPLICATE,
+    MenuState.ENROLL_GET_COUNT,
+    MenuState.ENROLL_CAPTURE,
+    MenuState.ENROLL_COMPLETE,
+    MenuState.ENROLL_ABORT,
 }
 
 DELETE_STATES = {
-    States.DELETE_START,
-    States.DELETE_CHOOSE_ENROLLED,
-    States.DELETE_CONFIRM,
-    States.DELETE_COMPLETE,
-    States.DELETE_ABORT
+    MenuState.DELETE_CHOOSE,
+    MenuState.DELETE_CONFIRM,
+    MenuState.DELETE_COMPLETE,
+    MenuState.DELETE_ABORT,
 }
 
-RED_TEXT = '\033[91m'
-RESET_TEXT = '\033[0m'
 
-PER_PAGES = 5
+@dataclass
+class EnrollmentSession:
+    label: str = ""
+    folder: Path | None = None
+    target_image_count: int = 0
+    saved_count: int = 0
 
-def displayText(state, enrol_list=None, page_num=0):
-    enrol_list = enrol_list or []
-    # Clear the terminal
-    os.system('cls' if os.name == 'nt' else 'clear')
-    if state == States.MENU:
-        print("""
- █████  ███    ██  ██████  ███    ███  █████  ██      ██    ██     ██████  ███████ ████████ ███████  ██████ ████████ ██  ██████  ███    ██ 
-██   ██ ████   ██ ██    ██ ████  ████ ██   ██ ██       ██  ██      ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ████   ██ 
-███████ ██ ██  ██ ██    ██ ██ ████ ██ ███████ ██        ████       ██   ██ █████      ██    █████   ██         ██    ██ ██    ██ ██ ██  ██ 
-██   ██ ██  ██ ██ ██    ██ ██  ██  ██ ██   ██ ██         ██        ██   ██ ██         ██    ██      ██         ██    ██ ██    ██ ██  ██ ██ 
-██   ██ ██   ████  ██████  ██      ██ ██   ██ ███████    ██        ██████  ███████    ██    ███████  ██████    ██    ██  ██████  ██   ████
-              """)
-        print("Enter 'help' to view available commands.")
-    elif state == States.HELP:
-        print("————— List of Commands —————")
-        print("[q] — Quit the program")
-        print("[help] — Access the help screen")
-        print("[menu] — Go back to the main menu")
-        print("[enrol] — Enrol a person into the database")
-        print("[delete] — Delete a currently enrolled person")
-        print("[detect] — Start live face recognition")  # NEW LINE
-    elif state == States.ENROL_GET_NAME:
-        print("————— Enter a name for the enrolled person —————")
+    def reset(self) -> None:
+        self.label = ""
+        self.folder = None
+        self.target_image_count = 0
+        self.saved_count = 0
+
+
+@dataclass
+class DeleteSession:
+    names: list[str]
+    page_number: int = 0
+    selected_name: str = ""
+
+
+def enrollment_folders() -> list[str]:
+    ENROLLMENTS_DIR.mkdir(exist_ok=True)
+    return sorted(path.name for path in ENROLLMENTS_DIR.iterdir() if path.is_dir())
+
+
+def sanitize_enrollment_label(value: str) -> str:
+    label = "".join(char for char in value.strip() if char not in INVALID_LABEL_CHARS)
+    return label.strip(". ")
+
+
+def clear_terminal() -> None:
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def prompt_user(error_message: str = "") -> str:
+    if error_message:
+        print(f"{RED_TEXT}{error_message}{RESET_TEXT}")
+    return input(">> ").strip().lower().replace(" ", "")
+
+
+def display_state(state: MenuState, delete_session: DeleteSession) -> None:
+    clear_terminal()
+    if state == MenuState.MENU:
+        print("Integrated Live Demo")
+        print("Type 'detect' to start live monitoring.")
+        print("Commands: detect | enroll | delete | help | q")
+    elif state == MenuState.HELP:
+        print("----- List of Commands -----")
+        print("[q] - Quit the program")
+        print("[help] - Access the help screen")
+        print("[menu] - Go back to the main menu")
+        print("[enroll] - Enroll a person into the database")
+        print("[delete] - Delete a currently enrolled person")
+        print("[detect] - Start live monitoring")
+    elif state == MenuState.ENROLL_GET_NAME:
+        print("----- Enter a name for the enrolled person -----")
         print("Enter 'exit' to abort enrolling")
-    elif state == States.ENROL_DUPLICATE_PEOPLE:
-        print("That person already exists. Do you want to overwrite or use pre-existing and add more photos?")
-        print("[a] — Overwrite")
-        print("[b] — Use pre-existing")
+    elif state == MenuState.ENROLL_DUPLICATE:
+        print("That person already exists. Overwrite or add more photos?")
+        print("[a] - Overwrite")
+        print("[b] - Add more photos")
         print("Enter 'exit' to abort enrolling")
-    elif state == States.ENROL_GET_NUM_OF_PICS:
-        print("————— Enter the number of pictures you want to take —————")
-    elif state == States.ENROL_TAKE_PICS:
-        print("Opening Camera...")
-    elif state == States.ENROL_COMPLETE:
-        print("————— Enrollment is complete! Enter 'exit' to return to the main menu —————")
-    elif state == States.ENROL_ABORT:
-        print("————— Enrolment aborted! —————")
+    elif state == MenuState.ENROLL_GET_COUNT:
+        print("----- Enter the number of pictures you want to take -----")
+    elif state == MenuState.ENROLL_CAPTURE:
+        print("Opening camera...")
+    elif state == MenuState.ENROLL_COMPLETE:
+        print("----- Enrollment is complete. Enter 'exit' to return to the main menu -----")
+    elif state == MenuState.ENROLL_ABORT:
+        print("----- Enrollment aborted -----")
         print("Do you want to resume or exit?")
-        print("[a] — Resume")
-        print("[b] — Exit")
-    elif state == States.DELETE_CHOOSE_ENROLLED:
-        print("————— Choose an Enrolment to delete —————")
+        print("[a] - Resume")
+        print("[b] - Exit")
+    elif state == MenuState.DELETE_CHOOSE:
+        print("----- Choose an enrollment to delete -----")
         print("Enter 'exit' to return to main menu")
-        if len(enrol_list) > 0:
-            # Pagination logic
-            result_per_page = PER_PAGES
-            offset = page_num * result_per_page
-            sub_list = []
-            if (len(enrol_list) - offset) > 5:
-                sub_list = enrol_list[offset:offset+5]
-            else:
-                sub_list = enrol_list[offset:]
-
-            for i in range(len(sub_list)):
-                print(f"[{i + offset}] — {sub_list[i]}")
-            print("————— [n/p] — next/prev —————")
-    elif state == States.DELETE_CONFIRM:
-        print("————— Are you sure? —————")
-        print("[y/n] — yes/no")
-    elif state == States.DELETE_COMPLETE:
-        print("————— Successfully Deleted! —————")
+        display_delete_page(delete_session)
+    elif state == MenuState.DELETE_CONFIRM:
+        print(f"Delete '{delete_session.selected_name}'?")
+        print("[y/n] - yes/no")
+    elif state == MenuState.DELETE_COMPLETE:
+        print("----- Successfully deleted -----")
         print("Enter 'exit' to return to main menu")
-    elif state == States.DELETE_ABORT:
-        print("————— Delete aborted! —————")
-        print("Enter 'exit' to return to main menu")
-    else:
-        print("No enrolled person. Enrol someone first!")
+    elif state == MenuState.DELETE_ABORT:
+        print("----- Delete aborted -----")
         print("Enter 'exit' to return to main menu")
 
 
-def getUserResponse(errorMsg):
-    if errorMsg:
-        print(f"{RED_TEXT}{errorMsg}{RESET_TEXT}")
-    user_input = input('>> ').lower()
-    user_input = user_input.replace(" ", "")
-    return user_input
+def display_delete_page(delete_session: DeleteSession) -> None:
+    if not delete_session.names:
+        print("No enrolled person. Enroll someone first.")
+        return
 
-def main():
-    # Initialize to begin at the MENU
-    curr_state = States.MENU
+    offset = delete_session.page_number * PAGE_SIZE
+    for index, name in enumerate(delete_session.names[offset : offset + PAGE_SIZE], start=offset):
+        print(f"[{index}] - {name}")
+
+    if len(delete_session.names) > PAGE_SIZE:
+        print("----- [n/p] - next/prev -----")
+
+
+def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
+    if session.folder is None:
+        raise RuntimeError("Enrollment folder has not been selected.")
+
+    camera_source = prompt_camera_source()
+    capture = open_capture(camera_source)
+    if not capture.isOpened():
+        print(f"Could not open camera source {camera_source}.")
+        input("Press Enter to continue...")
+        return MenuState.MENU
+
+    count = session.saved_count
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                print("Failed to grab frame. Returning to menu.")
+                input("Press Enter to continue...")
+                return MenuState.MENU
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("s") and count < session.target_image_count:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                image_path = session.folder / f"{session.label}_{count}_{timestamp}.jpg"
+                if cv2.imwrite(str(image_path), frame):
+                    count += 1
+                    if count >= session.target_image_count:
+                        session.saved_count = 0
+                        return MenuState.ENROLL_COMPLETE
+                else:
+                    print("Failed to write image to disk.")
+
+            cv2.putText(
+                frame,
+                f"Images: {count}/{session.target_image_count}. Press 's' to save, 'q' to stop",
+                (10, 24),
+                cv2.FONT_HERSHEY_PLAIN,
+                1,
+                (0, 0, 0),
+                1,
+            )
+            cv2.imshow("Enrollment Capture", frame)
+
+            if key == ord("q") and count < session.target_image_count:
+                session.saved_count = count
+                return MenuState.ENROLL_ABORT
+    finally:
+        capture.release()
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
+
+
+def handle_enrollment_state(
+    state: MenuState,
+    command: str,
+    session: EnrollmentSession,
+) -> tuple[MenuState, str]:
+    if command == "exit":
+        return MenuState.MENU, ""
+
+    if state == MenuState.ENROLL_GET_NAME:
+        if command == "q":
+            return state, "Enter a name for the person you want to enroll."
+
+        label = sanitize_enrollment_label(command)
+        if not label:
+            return state, "Enter a valid name using letters or numbers."
+
+        session.label = label
+        session.folder = ENROLLMENTS_DIR / label
+        if not session.folder.exists():
+            session.folder.mkdir(parents=True)
+            return MenuState.ENROLL_GET_COUNT, ""
+        return MenuState.ENROLL_DUPLICATE, ""
+
+    if state == MenuState.ENROLL_DUPLICATE:
+        if session.folder is None:
+            return MenuState.MENU, "Enrollment folder is missing. Returning to menu."
+
+        if command == "a":
+            shutil.rmtree(session.folder)
+            session.folder.mkdir(parents=True, exist_ok=True)
+        elif command != "b":
+            return state, "Invalid command. Choose 'a' or 'b'."
+        return MenuState.ENROLL_GET_COUNT, ""
+
+    if state == MenuState.ENROLL_GET_COUNT:
+        try:
+            target_count = int(command)
+        except ValueError:
+            return state, "Invalid input. Please enter an integer number."
+
+        if target_count <= 0:
+            return state, "Enter a value greater than 0."
+
+        session.target_image_count = target_count
+        return MenuState.ENROLL_CAPTURE, ""
+
+    if state == MenuState.ENROLL_ABORT:
+        return (MenuState.ENROLL_CAPTURE if command == "a" else MenuState.MENU), ""
+
+    return MenuState.MENU, ""
+
+
+def handle_delete_state(
+    state: MenuState,
+    command: str,
+    delete_session: DeleteSession,
+) -> tuple[MenuState, str]:
+    delete_session.names = enrollment_folders()
+    if command == "q":
+        return state, "Enter 'exit' instead."
+    if command == "exit":
+        return MenuState.MENU, ""
+
+    if state == MenuState.DELETE_CHOOSE:
+        max_page = max(0, math.ceil(len(delete_session.names) / PAGE_SIZE) - 1)
+        if command == "n":
+            delete_session.page_number = min(max_page, delete_session.page_number + 1)
+            return state, ""
+        if command == "p":
+            delete_session.page_number = max(0, delete_session.page_number - 1)
+            return state, ""
+
+        try:
+            index = int(command)
+        except ValueError:
+            return state, "Input is not an integer value."
+
+        if 0 <= index < len(delete_session.names):
+            delete_session.selected_name = delete_session.names[index]
+            return MenuState.DELETE_CONFIRM, ""
+        return state, "Input is out of range. Choose from the provided list."
+
+    if state == MenuState.DELETE_CONFIRM:
+        if command == "y":
+            selected_path = ENROLLMENTS_DIR / delete_session.selected_name
+            if not selected_path.exists():
+                return MenuState.DELETE_ABORT, "Enrollment folder no longer exists."
+            shutil.rmtree(selected_path)
+            return MenuState.DELETE_COMPLETE, ""
+        if command == "n":
+            return MenuState.DELETE_ABORT, ""
+        return state, "Invalid command. Enter either 'n' or 'y'."
+
+    return MenuState.MENU, ""
+
+
+def main() -> None:
+    state = MenuState.MENU
     error = ""
-
-    # For Enrollments
-    path: Path | None = None
-    enrolled_label = ""
-    num_of_pics = 0
-    saved_count = 0
-
-    # For Deletion
-    enrol_list = []
-    page_num = 0
-    chosen_enrolled = ""
+    enrollment_session = EnrollmentSession()
+    delete_session = DeleteSession(names=[])
 
     while True:
-
-        # State Entry Actions
-        if curr_state == States.ENROL_START:
-            curr_state = States.ENROL_GET_NAME
+        if state == MenuState.ENROLL_CAPTURE:
+            state = capture_enrollment_images(enrollment_session)
             continue
-        elif curr_state == States.ENROL_TAKE_PICS:
-            count = saved_count
-            cap = cv2.VideoCapture(0)
 
-            if not cap.isOpened():
-                error = "Could not open webcam. Exited to main menu"
-                curr_state = States.MENU
-                continue
-
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    print("Failed to grab frame... Exiting")
-                    break
-                
-                key = cv2.waitKey(1) & 0xFF
-
-                if key == ord('s') and count < num_of_pics:
-                    timestamp = datetime.datetime.now().strftime("Y%YM%mD%d_H%HM%MS%S")
-                    img_name = f"{enrolled_label}_{count}_{timestamp}.jpg"
-                    full_path = path / img_name
-                    if cv2.imwrite(str(full_path), frame):
-                        count += 1
-                        if count >= num_of_pics:
-                            curr_state = States.ENROL_COMPLETE
-                            saved_count = 0
-                            break
-                    else:
-                        print("Failed to write to disk")
-
-                cv2.putText(frame, f"Number of Images: {count}. Press 'q' to quit early", (10, 20), cv2.FONT_HERSHEY_PLAIN, 1, (0,0,0), 1)
-                cv2.imshow("Take Photo", frame)
-
-                if key == ord('q') and count < num_of_pics:
-                    curr_state = States.ENROL_ABORT
-                    saved_count = count
-                    break
-
-            cap.release()
-            cv2.destroyAllWindows()
-            cv2.waitKey(1)
-            continue
-        elif curr_state == States.DELETE_START:
-            curr_state = States.DELETE_CHOOSE_ENROLLED
-            continue
-        elif curr_state == States.DETECTION_START:  # NEW BLOCK
-            # Imported locally rather than at the top of the file so that loading
-            # YOLO and face_recognition only happens when the user actually runs detection.
-            # Keeps the menu's startup fast.
+        if state == MenuState.DETECT:
             from detection import run_detection
-            run_detection()
-            curr_state = States.MENU
+
+            run_detection(source=prompt_camera_source())
+            state = MenuState.MENU
             continue
 
-        displayText(curr_state, enrol_list=enrol_list, page_num=page_num)
-        user_res = getUserResponse(errorMsg=error)
-
+        display_state(state, delete_session)
+        command = prompt_user(error)
         error = ""
 
-        # Handle Enrolling states
-        if curr_state in ENROL_STATES:
-            if user_res == 'exit':
-                curr_state = States.MENU
-                continue
-            
-            # Handle States
-            if curr_state == States.ENROL_GET_NAME:
-                if user_res == 'q':
-                    error = "Enter a name for the person you want to enrol."
-                else:
-                    enrolled_label = user_res
-                    path = ENROLLMENTS_DIR / enrolled_label
-                    if not os.path.exists(path):
-                        os.makedirs(path)
-                        curr_state = States.ENROL_GET_NUM_OF_PICS
-                    else:
-                        curr_state = States.ENROL_DUPLICATE_PEOPLE
-            elif curr_state == States.ENROL_DUPLICATE_PEOPLE:
-                if user_res == 'a':
-                    try:
-                        # Delete the directory
-                        shutil.rmtree(path)
-
-                        # Re-create it
-                        os.makedirs(path, exist_ok=True)
-                    except OSError:
-                        error = "Failed to delete path... Returning to main menu"
-                        curr_state = States.MENU
-                        continue
-
-                elif user_res != 'b':
-                    error = "Invalid Command. Enter the correct option as listed before"
-                    continue
-                curr_state = States.ENROL_GET_NUM_OF_PICS
-            elif curr_state == States.ENROL_GET_NUM_OF_PICS:
-                try:
-                    num_of_pics = int(user_res)
-
-                    if num_of_pics <= 0:
-                        error = "Enter a value greater than 0"
-                        continue
-
-                    curr_state = States.ENROL_TAKE_PICS
-                except ValueError:
-                    error = "Invalid input. Please enter an integer number"
-            elif curr_state == States.ENROL_ABORT:
-                if user_res == 'a':
-                    curr_state = States.ENROL_TAKE_PICS
-                else:
-                    curr_state = States.MENU
-            continue
-        
-        if curr_state in DELETE_STATES:
-            ENROLLMENTS_DIR.mkdir(exist_ok=True)
-            enrol_list = os.listdir(ENROLLMENTS_DIR)
-            if user_res == 'q':
-                error = "Enter 'exit' instead"
-            elif user_res == 'exit':
-                curr_state = States.MENU
-                continue
-            elif curr_state == States.DELETE_CHOOSE_ENROLLED:
-                max_num_pages = math.ceil(len(enrol_list) / PER_PAGES) - 1
-                if user_res == 'n':
-                    if page_num >= 0 and page_num < max_num_pages:
-                        page_num += 1
-                elif user_res == 'p':
-                    if page_num > 0 and page_num <= max_num_pages:
-                        page_num -= 1
-                else:
-                    try:
-                        index = int(user_res);
-                        if index >= 0 and index <= len(enrol_list):
-                            chosen_enrolled = enrol_list[index]
-                            curr_state = States.DELETE_CONFIRM
-                        else:
-                            error = "Input is out of range. Choose from the provided list"
-                    except ValueError:
-                        error = "Input isn't an integer value."
-            elif curr_state == States.DELETE_CONFIRM:
-                if user_res == 'y':
-                    chosen_path = ENROLLMENTS_DIR / chosen_enrolled
-                    if not chosen_path.exists():
-                        error = "Error: path to enrolled person doesn't exist"
-                        curr_state = States.DELETE_ABORT
-                    else:
-                        shutil.rmtree(chosen_path)
-                        curr_state = States.DELETE_COMPLETE
-                elif user_res == 'n':
-                    curr_state = States.DELETE_ABORT
-                else:
-                    error = "Invalid command. Enter either 'n' or 'y'"            
+        if state in ENROLLMENT_STATES:
+            state, error = handle_enrollment_state(state, command, enrollment_session)
             continue
 
-        # Handle user input
-        if user_res == 'q':
-            # Only exit the program if we are not in enrol/delete states
-            if curr_state == States.MENU or curr_state == States.HELP:
-                break
-            else:
-                continue
-        elif user_res == 'help':
-            curr_state = States.HELP
-        elif user_res == 'menu':
-            curr_state = States.MENU
-        elif user_res == 'enrol':
-            curr_state = States.ENROL_START
+        if state in DELETE_STATES:
+            state, error = handle_delete_state(state, command, delete_session)
+            continue
 
-            # Reset all enrolment related variables
-            path = None
-            enrolled_label = ""
-            saved_count = 0
-            num_of_pics = 0
-        elif user_res == 'delete':
-            curr_state = States.DELETE_START
-            ENROLLMENTS_DIR.mkdir(exist_ok=True)
-            enrol_list = os.listdir(ENROLLMENTS_DIR)
-            page_num = 0
-        elif user_res == 'detect':  # NEW BLOCK
-            curr_state = States.DETECTION_START
+        if command == "q" and state in {MenuState.MENU, MenuState.HELP}:
+            break
+        if command == "help":
+            state = MenuState.HELP
+        elif command == "menu":
+            state = MenuState.MENU
+        elif command in {"enroll", "enrol"}:
+            enrollment_session.reset()
+            state = MenuState.ENROLL_GET_NAME
+        elif command == "delete":
+            delete_session = DeleteSession(names=enrollment_folders())
+            state = MenuState.DELETE_CHOOSE
+        elif command == "detect":
+            state = MenuState.DETECT
         else:
-            error = "Invalid Command. Go to 'help' to see list of commands"
-            continue
+            error = "Invalid command. Go to 'help' to see the list of commands."
+
 
 if __name__ == "__main__":
     main()
