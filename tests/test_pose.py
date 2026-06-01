@@ -13,6 +13,16 @@ from pose import MoveNetKeypoint, PoseAnalyzer
 
 
 class PoseAnalyzerOverlayTest(unittest.TestCase):
+    def test_landmarks_are_normalized_and_low_confidence_points_are_ignored(self) -> None:
+        landmarks = PoseAnalyzer.landmarks_from_keypoints(
+            np.array([[50.0, 25.0], [190.0, 90.0]], dtype=np.float32),
+            np.array([0.90, 0.10], dtype=np.float32),
+            frame_width=200,
+            frame_height=100,
+        )
+
+        self.assertEqual(landmarks, {0: (0.25, 0.25)})
+
     def test_person_box_wraps_visible_landmarks(self) -> None:
         analyzer = PoseAnalyzer.__new__(PoseAnalyzer)
         frame = np.zeros((100, 200, 3), dtype=np.uint8)

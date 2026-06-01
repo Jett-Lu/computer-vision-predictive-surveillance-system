@@ -1,9 +1,10 @@
-"""Live integrated monitoring with optional enrolled-person identification."""
+"""Live multi-person monitoring with optional enrolled-person identification."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 import os
@@ -22,10 +23,20 @@ TMP_DIR = PROJECT_ROOT / ".tmp"
 os.environ.setdefault("YOLO_CONFIG_DIR", str(TMP_DIR / "ultralytics"))
 
 ENROLLMENTS_DIR = PROJECT_ROOT / "enrollments"
-PERSON_MODEL_PATH = PROJECT_ROOT / "data" / "yolov8n.pt"
-
-YOLO_INTERVAL_FRAMES = 2
+EXPRESSION_INTERVAL_FRAMES = 5
+EXPRESSION_SCORE_ALPHA = 0.35
+STALE_TRACK_FRAMES = 90
 DEBUG_TIMING = False
+
+
+@dataclass
+class PersonRuntime:
+    """State that must stay isolated for each tracked person."""
+
+    wave_monitor: Any
+    review_monitor: Any
+    cached_emotion: Any = None
+    last_seen_frame: int = 0
 
 
 class StageTimer:
@@ -98,12 +109,20 @@ def _face_centre_inside_box(
     return px1 <= cx <= px2 and py1 <= cy <= py2
 
 
+def _track_key(track_id: int | None, detection_index: int) -> int:
+    """Return a persistent tracker ID or a frame-local fallback ID."""
+    return track_id if track_id is not None else -(detection_index + 1)
+
+
 def run_detection(source: int | str = 0) -> None:
-    """Run live monitoring with pose, expression, tracking, and identity overlays."""
+    """Run live multi-person pose, expression, tracking, and identity overlays."""
     cap = open_capture(source)
     if not cap.isOpened():
         print(f"Could not open camera source {source}. Returning to menu.")
-        input("Press Enter to continue...")
+        try:
+            input("Press Enter to continue...")
+        except EOFError:
+            pass
         return
 
     print("Loading identity models and enrollments...")
@@ -124,21 +143,13 @@ def run_detection(source: int | str = 0) -> None:
     from gesture import RightHandWaveMonitor
     from pose import DEFAULT_MODEL_PATH, PoseAnalyzer
     from review import ReviewLevelMonitor
-    from ultralytics import YOLO
 
-    print("Loading YOLO, pose, and emotion models...")
-    model = YOLO(str(PERSON_MODEL_PATH))
+    print("Loading multi-person pose and emotion models...")
     pose_analyzer = PoseAnalyzer(model_path=DEFAULT_MODEL_PATH)
-    wave_monitor = RightHandWaveMonitor()
-    review_monitor = ReviewLevelMonitor()
     emotion_analyzer = FaceEmotionAnalyzer()
-
-    expression_interval_frames = 5
-    expression_score_alpha = 0.35
-    cached_emotion: FaceEmotionResult | None = None
-    cached_boxes = None
-    frame_count = 0
+    person_states: dict[int, PersonRuntime] = {}
     track_id_to_name: dict[int, str] = {}
+    frame_count = 0
     timer = StageTimer(print_every=30) if DEBUG_TIMING else NoOpTimer()
 
     print("Detection running. Press 'q' in the camera window to quit.")
@@ -151,86 +162,74 @@ def run_detection(source: int | str = 0) -> None:
                 break
 
             timestamp = time.monotonic()
+            annotated = frame.copy()
 
-            with timer("pose"):
-                pose_result = pose_analyzer.analyze(frame)
-                wave_state = wave_monitor.update(pose_result.landmarks, timestamp)
-                person_box_from_pose = pose_analyzer.person_box(
+            with timer("pose_track"):
+                tracked_poses = pose_analyzer.analyze(frame)
+
+            for detection_index, pose_result in enumerate(tracked_poses):
+                track_key = _track_key(pose_result.track_id, detection_index)
+                runtime = person_states.get(track_key)
+                if runtime is None:
+                    runtime = PersonRuntime(
+                        wave_monitor=RightHandWaveMonitor(),
+                        review_monitor=ReviewLevelMonitor(),
+                    )
+                    person_states[track_key] = runtime
+                runtime.last_seen_frame = frame_count
+
+                wave_state = runtime.wave_monitor.update(
                     pose_result.landmarks,
-                    frame,
+                    timestamp,
                 )
 
-            expression_event_counted = False
-            if frame_count % expression_interval_frames == 0:
-                with timer("emotion"):
-                    detected_emotion = emotion_analyzer.analyze(frame, person_box_from_pose)
-                    expression_event_counted = review_monitor.observe_expression(
+                expression_event_counted = False
+                if frame_count % EXPRESSION_INTERVAL_FRAMES == 0:
+                    with timer("emotion"):
+                        detected_emotion = emotion_analyzer.analyze(
+                            frame,
+                            pose_result.box,
+                        )
+                    expression_event_counted = runtime.review_monitor.observe_expression(
                         detected_emotion.label if detected_emotion is not None else None,
                         detected_emotion.confidence if detected_emotion is not None else None,
                         timestamp,
                     )
-                    if detected_emotion is None:
-                        cached_emotion = None
-                    elif (
-                        cached_emotion is not None
-                        and cached_emotion.label == detected_emotion.label
-                    ):
-                        smoothed_confidence = (
-                            expression_score_alpha * detected_emotion.confidence
-                            + (1 - expression_score_alpha) * cached_emotion.confidence
-                        )
-                        cached_emotion = FaceEmotionResult(
-                            box=detected_emotion.box,
-                            keypoints=detected_emotion.keypoints,
-                            label=detected_emotion.label,
-                            confidence=smoothed_confidence,
-                        )
-                    else:
-                        cached_emotion = detected_emotion
-
-            review_state = review_monitor.update(wave_state, timestamp)
-
-            with timer("render_pose"):
-                annotated = pose_analyzer.render(
-                    frame,
-                    pose_result.landmarks,
-                    review_state.color,
-                )
-
-            if person_box_from_pose is not None:
-                _draw_review_overlay(
-                    annotated,
-                    person_box_from_pose,
-                    review_state,
-                    wave_state.wave_detected,
-                    expression_event_counted,
-                )
-
-            if frame_count % YOLO_INTERVAL_FRAMES == 0 or cached_boxes is None:
-                with timer("yolo_track"):
-                    results = model.track(
-                        frame,
-                        conf=0.30,
-                        iou=0.45,
-                        verbose=False,
-                        classes=[0],
-                        persist=True,
-                        tracker="bytetrack.yaml",
+                    runtime.cached_emotion = _smooth_emotion(
+                        runtime.cached_emotion,
+                        detected_emotion,
+                        FaceEmotionResult,
                     )
-                    cached_boxes = results[0].boxes
 
-            with timer("identity_loop"):
-                _draw_identity_overlays(
-                    frame=frame,
-                    annotated=annotated,
-                    boxes=cached_boxes,
-                    identity_matcher=identity_matcher,
-                    known_identities=known_identities,
-                    track_id_to_name=track_id_to_name,
-                    person_box_from_pose=person_box_from_pose,
-                    cached_emotion=cached_emotion,
-                    review_color=review_state.color,
-                )
+                review_state = runtime.review_monitor.update(wave_state, timestamp)
+                with timer("render_pose"):
+                    pose_analyzer.draw_landmarks(
+                        annotated,
+                        pose_result.landmarks,
+                        review_state.color,
+                    )
+                    _draw_review_overlay(
+                        annotated,
+                        pose_result.box,
+                        review_state,
+                        wave_state.wave_detected,
+                        expression_event_counted,
+                    )
+
+                with timer("identity"):
+                    _draw_identity_overlay(
+                        frame=frame,
+                        annotated=annotated,
+                        person_box=pose_result.box,
+                        track_id=pose_result.track_id,
+                        identity_matcher=identity_matcher,
+                        known_identities=known_identities,
+                        track_id_to_name=track_id_to_name,
+                        cached_emotion=runtime.cached_emotion,
+                        review_color=review_state.color,
+                    )
+
+            _discard_stale_tracks(person_states, track_id_to_name, frame_count)
 
             with timer("display"):
                 cv2.imshow("Live Monitoring", annotated)
@@ -245,6 +244,43 @@ def run_detection(source: int | str = 0) -> None:
         emotion_analyzer.close()
         cv2.destroyAllWindows()
         cv2.waitKey(1)
+
+
+def _smooth_emotion(
+    cached_emotion: Any,
+    detected_emotion: Any,
+    emotion_result_type: Any,
+) -> Any:
+    if detected_emotion is None:
+        return None
+    if cached_emotion is None or cached_emotion.label != detected_emotion.label:
+        return detected_emotion
+
+    smoothed_confidence = (
+        EXPRESSION_SCORE_ALPHA * detected_emotion.confidence
+        + (1 - EXPRESSION_SCORE_ALPHA) * cached_emotion.confidence
+    )
+    return emotion_result_type(
+        box=detected_emotion.box,
+        keypoints=detected_emotion.keypoints,
+        label=detected_emotion.label,
+        confidence=smoothed_confidence,
+    )
+
+
+def _discard_stale_tracks(
+    person_states: dict[int, PersonRuntime],
+    track_id_to_name: dict[int, str],
+    frame_count: int,
+) -> None:
+    stale_keys = [
+        track_key
+        for track_key, runtime in person_states.items()
+        if frame_count - runtime.last_seen_frame > STALE_TRACK_FRAMES
+    ]
+    for track_key in stale_keys:
+        del person_states[track_key]
+        track_id_to_name.pop(track_key, None)
 
 
 def _draw_review_overlay(
@@ -303,54 +339,47 @@ def _draw_review_overlay(
     )
 
 
-def _draw_identity_overlays(
+def _draw_identity_overlay(
     frame: Any,
     annotated: Any,
-    boxes: Any,
+    person_box: tuple[int, int, int, int],
+    track_id: int | None,
     identity_matcher: OpenCVFaceIdentifier,
     known_identities: Sequence[KnownIdentity],
     track_id_to_name: dict[int, str],
-    person_box_from_pose: tuple[int, int, int, int] | None,
     cached_emotion: Any,
     review_color: tuple[int, int, int],
 ) -> None:
-    if boxes is None:
+    x1, y1, x2, y2 = person_box
+    cropped_img = frame[y1:y2, x1:x2]
+    if cropped_img.size == 0:
         return
 
-    for index in range(len(boxes)):
-        x1, y1, x2, y2 = boxes.xyxy[index].int().tolist()
-        cropped_img = frame[y1:y2, x1:x2]
-        if cropped_img.size == 0:
-            continue
+    detected_face = identity_matcher.detect_largest_face(cropped_img)
+    face_box = person_box if detected_face is None else offset_box(
+        detected_face.box,
+        x1,
+        y1,
+    )
 
-        track_id = None if boxes.id is None else int(boxes.id[index].item())
-        detected_face = identity_matcher.detect_largest_face(cropped_img)
-        face_box = (x1, y1, x2, y2) if detected_face is None else offset_box(
-            detected_face.box,
-            x1,
-            y1,
-        )
+    if not known_identities or detected_face is None:
+        name = "Person"
+    elif track_id is not None and track_id in track_id_to_name:
+        name = track_id_to_name[track_id]
+    else:
+        match = identity_matcher.identify(cropped_img, detected_face, known_identities)
+        name = match.name
+        if track_id is not None and match.matched:
+            track_id_to_name[track_id] = name
 
-        if not known_identities or detected_face is None:
-            name = "Person"
-        elif track_id is not None and track_id in track_id_to_name:
-            name = track_id_to_name[track_id]
-        else:
-            match = identity_matcher.identify(cropped_img, detected_face, known_identities)
-            name = match.name
-            if track_id is not None and match.matched:
-                track_id_to_name[track_id] = name
+    if cached_emotion is not None and detected_face is None:
+        face_box = cached_emotion.box
 
-        follows_pose_subject = _face_centre_inside_box(face_box, person_box_from_pose)
-        if cached_emotion is not None and follows_pose_subject and detected_face is None:
-            face_box = cached_emotion.box
+    label_text = name
+    if cached_emotion is not None:
+        label_text = f"{name} | {cached_emotion.label} {cached_emotion.confidence:.2f}"
 
-        label_text = name
-        if cached_emotion is not None and follows_pose_subject:
-            label_text = f"{name} | {cached_emotion.label} {cached_emotion.confidence:.2f}"
-
-        box_color = review_color if follows_pose_subject else (0, 255, 0)
-        _draw_label_box(annotated, face_box, label_text, box_color)
+    _draw_label_box(annotated, face_box, label_text, review_color)
 
 
 def _draw_label_box(

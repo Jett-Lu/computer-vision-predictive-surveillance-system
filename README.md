@@ -2,16 +2,17 @@
 
 Live webcam demo combining:
 
-- MoveNet Lightning skeleton rendering
+- multi-person YOLO pose tracking and skeleton rendering
 - repeated raised right-hand wave activity tiers
 - MediaPipe face detection
 - EmotiEffLib facial-expression estimates
 - YOLO person tracking
 - optional enrolled-person identification with OpenCV YuNet + SFace
 
-YOLO can display multiple detected people. The pose, wave, expression
-modifier, and review overlay currently apply to the single person selected by
-MoveNet SinglePose.
+Each tracked person receives an independent skeleton, wave counter, expression
+modifier, review overlay, and optional identity label. The
+`data/yolov8n-pose.pt` model is downloaded automatically on first use if it is
+not already present.
 
 ## Identity Matching
 

@@ -5,3 +5,4 @@ __pycache__/
 enrollments/
 data/face_detection_yunet_2023mar.onnx
 data/face_recognition_sface_2021dec.onnx
+data/yolov8n-pose.pt
