@@ -68,3 +68,23 @@ python src/main.py --detect --source 1
 
 Camera source `0` is usually the built-in webcam. Source `1` is often an
 external USB camera.
+
+## Export An Annotated Photo Or Video
+
+Place a photo or recorded video in the `input` folder, then run:
+
+```powershell
+python src/main.py --process-media
+```
+
+Annotated copies are written to the `output` folder. The command supports
+photos (`.bmp`, `.jpeg`, `.jpg`, `.png`, `.webp`) and videos (`.avi`, `.m4v`,
+`.mkv`, `.mov`, `.mp4`).
+
+On Windows, you can also double-click `Run Media Export.cmd`.
+
+You can also process one specific file:
+
+```powershell
+python src/main.py --process-media --input "C:\path\to\photo.jpg"
+```
