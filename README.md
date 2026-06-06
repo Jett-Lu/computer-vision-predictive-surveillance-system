@@ -88,3 +88,16 @@ You can also process one specific file:
 ```powershell
 python src/main.py --process-media --input "C:\path\to\photo.jpg"
 ```
+
+## Demo-Only High Review Override
+
+For controlled demos, an enrolled identity can be displayed in the red `HIGH`
+tier without waiting for repeated activity to accumulate:
+
+```powershell
+$env:DEMO_HIGH_REVIEW_NAMES = "Taylor Brooks"
+python src/main.py --process-media --input "input\demo.png"
+```
+
+This override is only for staged demonstrations. Leave
+`DEMO_HIGH_REVIEW_NAMES` unset for normal runs.

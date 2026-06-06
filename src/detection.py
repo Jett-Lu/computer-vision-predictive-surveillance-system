@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 import os
@@ -14,7 +14,7 @@ import cv2
 
 from camera import open_capture
 from identity import KnownIdentity, OpenCVFaceIdentifier, offset_box
-from review import ReviewState
+from review import HIGH_COLOR, ReviewState
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,7 @@ EXPRESSION_INTERVAL_FRAMES = 5
 EXPRESSION_SCORE_ALPHA = 0.35
 STALE_TRACK_FRAMES = 90
 DEBUG_TIMING = False
+DEMO_HIGH_REVIEW_ENV = "DEMO_HIGH_REVIEW_NAMES"
 
 
 @dataclass
@@ -37,6 +38,15 @@ class PersonRuntime:
     review_monitor: Any
     cached_emotion: Any = None
     last_seen_frame: int = 0
+
+
+@dataclass(frozen=True)
+class IdentityOverlay:
+    """Resolved identity label details for one tracked person."""
+
+    name: str
+    face_box: tuple[int, int, int, int]
+    label_text: str
 
 
 class StageTimer:
@@ -114,6 +124,172 @@ def _track_key(track_id: int | None, detection_index: int) -> int:
     return track_id if track_id is not None else -(detection_index + 1)
 
 
+def _parse_demo_high_review_names(raw_names: str) -> set[str]:
+    """Parse optional demo-only names that should be displayed as HIGH."""
+    return {
+        name.strip().casefold()
+        for name in raw_names.replace(";", ",").split(",")
+        if name.strip()
+    }
+
+
+def _apply_demo_review_override(
+    review_state: ReviewState,
+    identity_name: str,
+    demo_high_review_names: set[str],
+) -> ReviewState:
+    """Force named enrolled demo identities to HIGH without changing normal logic."""
+    if identity_name.casefold() not in demo_high_review_names:
+        return review_state
+
+    return replace(
+        review_state,
+        tier_label="HIGH",
+        color=HIGH_COLOR,
+        score=max(review_state.score, 5.0),
+        recent_wave_count=max(review_state.recent_wave_count, 5),
+    )
+
+
+class MonitoringProcessor:
+    """Apply the monitoring pipeline to frames from a live or recorded source."""
+
+    def __init__(self, debug_timing: bool = DEBUG_TIMING) -> None:
+        print("Loading identity models and enrollments...")
+        self.identity_matcher = OpenCVFaceIdentifier()
+        self.known_identities = self.identity_matcher.load_enrollments(ENROLLMENTS_DIR)
+        if not self.known_identities:
+            print("Identity names: OFF")
+            print("Reason: no enrolled faces were found.")
+            print(
+                "Action: monitoring will run anonymously. "
+                "Use 'enroll' from the menu to add people."
+            )
+        else:
+            names = {identity.name for identity in self.known_identities}
+            print(
+                f"Identity names: ON "
+                f"({len(self.known_identities)} encodings for {len(names)} people)"
+            )
+
+        from emotion import FaceEmotionAnalyzer, FaceEmotionResult
+        from gesture import RightHandWaveMonitor
+        from pose import DEFAULT_MODEL_PATH, PoseAnalyzer
+        from review import ReviewLevelMonitor
+
+        print("Loading multi-person pose and emotion models...")
+        self.pose_analyzer = PoseAnalyzer(model_path=DEFAULT_MODEL_PATH)
+        self.emotion_analyzer = FaceEmotionAnalyzer()
+        self.emotion_result_type = FaceEmotionResult
+        self.wave_monitor_type = RightHandWaveMonitor
+        self.review_monitor_type = ReviewLevelMonitor
+        self.person_states: dict[int, PersonRuntime] = {}
+        self.track_id_to_name: dict[int, str] = {}
+        self.demo_high_review_names = _parse_demo_high_review_names(
+            os.environ.get(DEMO_HIGH_REVIEW_ENV, "")
+        )
+        if self.demo_high_review_names:
+            names = ", ".join(sorted(self.demo_high_review_names))
+            print(f"Demo review override: HIGH for {names}")
+        self.frame_count = 0
+        self.timer = StageTimer(print_every=30) if debug_timing else NoOpTimer()
+
+    def process_frame(
+        self,
+        frame: Any,
+        timestamp: float | None = None,
+    ) -> Any:
+        """Return one annotated frame while preserving per-person tracking state."""
+        if timestamp is None:
+            timestamp = time.monotonic()
+        annotated = frame.copy()
+
+        with self.timer("pose_track"):
+            tracked_poses = self.pose_analyzer.analyze(frame)
+
+        for detection_index, pose_result in enumerate(tracked_poses):
+            track_key = _track_key(pose_result.track_id, detection_index)
+            runtime = self.person_states.get(track_key)
+            if runtime is None:
+                runtime = PersonRuntime(
+                    wave_monitor=self.wave_monitor_type(),
+                    review_monitor=self.review_monitor_type(),
+                )
+                self.person_states[track_key] = runtime
+            runtime.last_seen_frame = self.frame_count
+
+            wave_state = runtime.wave_monitor.update(
+                pose_result.landmarks,
+                timestamp,
+            )
+
+            expression_event_counted = False
+            if self.frame_count % EXPRESSION_INTERVAL_FRAMES == 0:
+                with self.timer("emotion"):
+                    detected_emotion = self.emotion_analyzer.analyze(
+                        frame,
+                        pose_result.box,
+                    )
+                expression_event_counted = runtime.review_monitor.observe_expression(
+                    detected_emotion.label if detected_emotion is not None else None,
+                    detected_emotion.confidence if detected_emotion is not None else None,
+                    timestamp,
+                )
+                runtime.cached_emotion = _smooth_emotion(
+                    runtime.cached_emotion,
+                    detected_emotion,
+                    self.emotion_result_type,
+                )
+
+            review_state = runtime.review_monitor.update(wave_state, timestamp)
+            with self.timer("identity"):
+                identity_overlay = _resolve_identity_overlay(
+                    frame=frame,
+                    person_box=pose_result.box,
+                    track_id=pose_result.track_id,
+                    identity_matcher=self.identity_matcher,
+                    known_identities=self.known_identities,
+                    track_id_to_name=self.track_id_to_name,
+                    cached_emotion=runtime.cached_emotion,
+                )
+            review_state = _apply_demo_review_override(
+                review_state,
+                identity_overlay.name,
+                self.demo_high_review_names,
+            )
+            with self.timer("render_pose"):
+                self.pose_analyzer.draw_landmarks(
+                    annotated,
+                    pose_result.landmarks,
+                    review_state.color,
+                )
+                _draw_review_overlay(
+                    annotated,
+                    pose_result.box,
+                    review_state,
+                    wave_state.wave_detected,
+                    expression_event_counted,
+                )
+                _draw_identity_overlay(
+                    annotated=annotated,
+                    identity_overlay=identity_overlay,
+                    review_color=review_state.color,
+                )
+
+        _discard_stale_tracks(
+            self.person_states,
+            self.track_id_to_name,
+            self.frame_count,
+        )
+        self.frame_count += 1
+        self.timer.tick()
+        return annotated
+
+    def close(self) -> None:
+        """Release model resources owned by the processor."""
+        self.emotion_analyzer.close()
+
+
 def run_detection(source: int | str = 0) -> None:
     """Run live multi-person pose, expression, tracking, and identity overlays."""
     cap = open_capture(source)
@@ -125,123 +301,25 @@ def run_detection(source: int | str = 0) -> None:
             pass
         return
 
-    print("Loading identity models and enrollments...")
-    identity_matcher = OpenCVFaceIdentifier()
-    known_identities = identity_matcher.load_enrollments(ENROLLMENTS_DIR)
-    if not known_identities:
-        print("Identity names: OFF")
-        print("Reason: no enrolled faces were found.")
-        print(
-            "Action: live monitoring will run anonymously. "
-            "Use 'enroll' from the menu to add people."
-        )
-    else:
-        names = {identity.name for identity in known_identities}
-        print(f"Identity names: ON ({len(known_identities)} encodings for {len(names)} people)")
-
-    from emotion import FaceEmotionAnalyzer, FaceEmotionResult
-    from gesture import RightHandWaveMonitor
-    from pose import DEFAULT_MODEL_PATH, PoseAnalyzer
-    from review import ReviewLevelMonitor
-
-    print("Loading multi-person pose and emotion models...")
-    pose_analyzer = PoseAnalyzer(model_path=DEFAULT_MODEL_PATH)
-    emotion_analyzer = FaceEmotionAnalyzer()
-    person_states: dict[int, PersonRuntime] = {}
-    track_id_to_name: dict[int, str] = {}
-    frame_count = 0
-    timer = StageTimer(print_every=30) if DEBUG_TIMING else NoOpTimer()
-
-    print("Detection running. Press 'q' in the camera window to quit.")
-
+    processor: MonitoringProcessor | None = None
     try:
+        processor = MonitoringProcessor()
+        print("Detection running. Press 'q' in the camera window to quit.")
         while True:
             ret, frame = cap.read()
             if not ret:
                 print("Failed to grab frame. Exiting detection.")
                 break
 
-            timestamp = time.monotonic()
-            annotated = frame.copy()
-
-            with timer("pose_track"):
-                tracked_poses = pose_analyzer.analyze(frame)
-
-            for detection_index, pose_result in enumerate(tracked_poses):
-                track_key = _track_key(pose_result.track_id, detection_index)
-                runtime = person_states.get(track_key)
-                if runtime is None:
-                    runtime = PersonRuntime(
-                        wave_monitor=RightHandWaveMonitor(),
-                        review_monitor=ReviewLevelMonitor(),
-                    )
-                    person_states[track_key] = runtime
-                runtime.last_seen_frame = frame_count
-
-                wave_state = runtime.wave_monitor.update(
-                    pose_result.landmarks,
-                    timestamp,
-                )
-
-                expression_event_counted = False
-                if frame_count % EXPRESSION_INTERVAL_FRAMES == 0:
-                    with timer("emotion"):
-                        detected_emotion = emotion_analyzer.analyze(
-                            frame,
-                            pose_result.box,
-                        )
-                    expression_event_counted = runtime.review_monitor.observe_expression(
-                        detected_emotion.label if detected_emotion is not None else None,
-                        detected_emotion.confidence if detected_emotion is not None else None,
-                        timestamp,
-                    )
-                    runtime.cached_emotion = _smooth_emotion(
-                        runtime.cached_emotion,
-                        detected_emotion,
-                        FaceEmotionResult,
-                    )
-
-                review_state = runtime.review_monitor.update(wave_state, timestamp)
-                with timer("render_pose"):
-                    pose_analyzer.draw_landmarks(
-                        annotated,
-                        pose_result.landmarks,
-                        review_state.color,
-                    )
-                    _draw_review_overlay(
-                        annotated,
-                        pose_result.box,
-                        review_state,
-                        wave_state.wave_detected,
-                        expression_event_counted,
-                    )
-
-                with timer("identity"):
-                    _draw_identity_overlay(
-                        frame=frame,
-                        annotated=annotated,
-                        person_box=pose_result.box,
-                        track_id=pose_result.track_id,
-                        identity_matcher=identity_matcher,
-                        known_identities=known_identities,
-                        track_id_to_name=track_id_to_name,
-                        cached_emotion=runtime.cached_emotion,
-                        review_color=review_state.color,
-                    )
-
-            _discard_stale_tracks(person_states, track_id_to_name, frame_count)
-
-            with timer("display"):
-                cv2.imshow("Live Monitoring", annotated)
-                frame_count += 1
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("Exiting detection.")
-                    break
-
-            timer.tick()
+            annotated = processor.process_frame(frame)
+            cv2.imshow("Live Monitoring", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("Exiting detection.")
+                break
     finally:
         cap.release()
-        emotion_analyzer.close()
+        if processor is not None:
+            processor.close()
         cv2.destroyAllWindows()
         cv2.waitKey(1)
 
@@ -292,35 +370,16 @@ def _draw_review_overlay(
 ) -> None:
     px1, py1, px2, py2 = person_box
     cv2.rectangle(frame, (px1, py1), (px2, py2), review_state.color, 3)
-    status = (
-        f"Review level: {review_state.tier_label} "
-        f"| waves: {review_state.recent_wave_count} "
-        f"| modifier: x{review_state.expression_multiplier:.2f}"
-    )
-    cv2.putText(
-        frame,
-        status,
-        (px1, max(25, py1 - 34)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        review_state.color,
-        2,
-    )
-    concern_text = "Concern influence: none"
+    status_lines = [
+        review_state.tier_label,
+        f"w:{review_state.recent_wave_count} | x{review_state.expression_multiplier:.2f}",
+    ]
     if review_state.concern_expression_active:
-        concern_text = (
-            f"Concern influence: {review_state.concern_label} "
-            f"{review_state.concern_strength:.0%}"
+        status_lines.append(
+            f"{review_state.concern_label} {review_state.concern_strength:.0%}"
         )
-    cv2.putText(
-        frame,
-        concern_text,
-        (px1, max(47, py1 - 12)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        review_state.color,
-        2,
-    )
+    _draw_status_panel(frame, person_box, status_lines, review_state.color)
+
     if wave_detected:
         message = "Right-hand wave counted"
     elif expression_event_counted:
@@ -339,21 +398,55 @@ def _draw_review_overlay(
     )
 
 
-def _draw_identity_overlay(
+def _draw_status_panel(
     frame: Any,
-    annotated: Any,
+    person_box: tuple[int, int, int, int],
+    lines: list[str],
+    color: tuple[int, int, int],
+) -> None:
+    """Draw a compact readable status panel within one person's bounding box."""
+    x1, y1, x2, y2 = person_box
+    available_width = max(1, x2 - x1 - 8)
+    line_height = 15
+    panel_bottom = min(y2, y1 + 5 + line_height * len(lines))
+    cv2.rectangle(frame, (x1, y1), (x2, panel_bottom), color, cv2.FILLED)
+    for index, text in enumerate(lines):
+        preferred_scale = 0.48 if index == 0 else 0.40
+        text_width = cv2.getTextSize(
+            text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            preferred_scale,
+            1,
+        )[0][0]
+        scale = (
+            preferred_scale
+            if text_width <= available_width
+            else preferred_scale * available_width / max(1, text_width)
+        )
+        cv2.putText(
+            frame,
+            text,
+            (x1 + 4, y1 + 13 + line_height * index),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (255, 255, 255),
+            1,
+        )
+
+
+def _resolve_identity_overlay(
+    frame: Any,
     person_box: tuple[int, int, int, int],
     track_id: int | None,
     identity_matcher: OpenCVFaceIdentifier,
     known_identities: Sequence[KnownIdentity],
     track_id_to_name: dict[int, str],
     cached_emotion: Any,
-    review_color: tuple[int, int, int],
-) -> None:
+) -> IdentityOverlay:
     x1, y1, x2, y2 = person_box
     cropped_img = frame[y1:y2, x1:x2]
     if cropped_img.size == 0:
-        return
+        return IdentityOverlay("Person", person_box, "Person")
 
     detected_face = identity_matcher.detect_largest_face(cropped_img)
     face_box = person_box if detected_face is None else offset_box(
@@ -379,7 +472,20 @@ def _draw_identity_overlay(
     if cached_emotion is not None:
         label_text = f"{name} | {cached_emotion.label} {cached_emotion.confidence:.2f}"
 
-    _draw_label_box(annotated, face_box, label_text, review_color)
+    return IdentityOverlay(name, face_box, label_text)
+
+
+def _draw_identity_overlay(
+    annotated: Any,
+    identity_overlay: IdentityOverlay,
+    review_color: tuple[int, int, int],
+) -> None:
+    _draw_label_box(
+        annotated,
+        identity_overlay.face_box,
+        identity_overlay.label_text,
+        review_color,
+    )
 
 
 def _draw_label_box(
@@ -390,15 +496,46 @@ def _draw_label_box(
 ) -> None:
     x1, y1, x2, y2 = box
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    cv2.rectangle(frame, (x1, y2 - 30), (x2, y2), color, cv2.FILLED)
+
+    frame_height, frame_width = frame.shape[:2]
+    preferred_scale = 0.6
+    thickness = 1
+    text_width, text_height = cv2.getTextSize(
+        label_text,
+        cv2.FONT_HERSHEY_DUPLEX,
+        preferred_scale,
+        thickness,
+    )[0]
+    max_width = max(80, frame_width - 12)
+    scale = (
+        preferred_scale
+        if text_width + 12 <= max_width
+        else preferred_scale * max_width / max(1, text_width + 12)
+    )
+    text_width, text_height = cv2.getTextSize(
+        label_text,
+        cv2.FONT_HERSHEY_DUPLEX,
+        scale,
+        thickness,
+    )[0]
+    label_width = min(frame_width, text_width + 12)
+    label_height = max(24, text_height + 14)
+    label_x1 = min(max(0, x1), max(0, frame_width - label_width))
+    label_y1 = y2 - label_height
+    if label_y1 < 0:
+        label_y1 = min(max(0, y1), max(0, frame_height - label_height))
+    label_x2 = label_x1 + label_width
+    label_y2 = min(frame_height, label_y1 + label_height)
+
+    cv2.rectangle(frame, (label_x1, label_y1), (label_x2, label_y2), color, cv2.FILLED)
     cv2.putText(
         frame,
         label_text,
-        (x1 + 6, y2 - 8),
+        (label_x1 + 6, label_y2 - 8),
         cv2.FONT_HERSHEY_DUPLEX,
-        0.6,
+        scale,
         (255, 255, 255),
-        1,
+        thickness,
     )
 
 

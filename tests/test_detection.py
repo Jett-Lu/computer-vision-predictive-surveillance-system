@@ -9,10 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from detection import (
     PersonRuntime,
+    _apply_demo_review_override,
     _discard_stale_tracks,
     _face_centre_inside_box,
+    _parse_demo_high_review_names,
     _track_key,
 )
+from review import CLEAR_COLOR, HIGH_COLOR, ReviewState
 
 
 class DetectionAssociationTest(unittest.TestCase):
@@ -39,6 +42,23 @@ class DetectionAssociationTest(unittest.TestCase):
 
     def test_face_is_not_associated_when_person_box_is_missing(self) -> None:
         self.assertFalse(_face_centre_inside_box((30, 20, 50, 40), None))
+
+    def test_demo_high_review_names_are_parsed_case_insensitively(self) -> None:
+        self.assertEqual(
+            _parse_demo_high_review_names("Alex Chen; Priya Shah,  "),
+            {"alex chen", "priya shah"},
+        )
+
+    def test_demo_high_review_override_only_changes_named_identity(self) -> None:
+        state = ReviewState("CLEAR", CLEAR_COLOR, 0.0, 0, 1.0, 0.0, None)
+
+        unchanged = _apply_demo_review_override(state, "Jordan Lee", {"alex chen"})
+        overridden = _apply_demo_review_override(state, "Alex Chen", {"alex chen"})
+
+        self.assertIs(unchanged, state)
+        self.assertEqual(overridden.tier_label, "HIGH")
+        self.assertEqual(overridden.color, HIGH_COLOR)
+        self.assertEqual(overridden.recent_wave_count, 5)
 
 
 if __name__ == "__main__":
