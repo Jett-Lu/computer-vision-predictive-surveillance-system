@@ -1,4 +1,5 @@
 # Integrated Live Demo
+<img width="1069" height="598" alt="image" src="https://github.com/user-attachments/assets/86a42448-1c48-4964-a3bd-06a802892731" />
 
 Live webcam demo combining:
 
@@ -15,6 +16,7 @@ modifier, review overlay, and optional identity label. The
 not already present.
 
 ## Identity Matching
+<img width="1118" height="624" alt="image" src="https://github.com/user-attachments/assets/546550a0-efeb-4ee6-baf0-524638fbcb93" />
 
 Identity matching no longer depends on `dlib` or the `face-recognition`
 package. The default stack uses OpenCV's DNN APIs:
@@ -31,6 +33,7 @@ If no enrollments are available, the live monitoring demo continues
 anonymously.
 
 ## Review Indicator
+<img width="545" height="860" alt="image" src="https://github.com/user-attachments/assets/f0dc70a0-f4f5-42e6-9180-1b26db5841f3" />
 
 The overlay begins green. Completed right-hand wave gestures are counted in a
 rolling 30-second window, with two waves ignored as likely ordinary activity.
