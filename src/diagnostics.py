@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import os
 import platform
 import sys
 
-import cv2
-
 from config import AppConfig
 from model_manager import (
     ModelUnavailableError,
+    emotion_model_spec,
     ensure_model,
     file_sha256,
     identity_model_specs,
@@ -40,18 +38,17 @@ def run_diagnostics(
             f"{platform.system()} {platform.release()} | Python {sys.version.split()[0]}",
         ),
         _check_packages(),
-        DiagnosticCheck(
-            "OpenCV face APIs",
-            hasattr(cv2, "FaceDetectorYN_create") and hasattr(cv2, "FaceRecognizerSF_create"),
-            "YuNet and SFace APIs available"
-            if hasattr(cv2, "FaceDetectorYN_create") and hasattr(cv2, "FaceRecognizerSF_create")
-            else "Install opencv-contrib-python",
-        ),
+        _check_opencv_face_apis(),
         _check_writable_directory(config.output_dir, "Output directory"),
         _check_writable_directory(config.data_dir, "Model directory"),
+        _check_readable_file(config.emotion_face_model_path, "MediaPipe face detector"),
     ]
 
-    specs = (*identity_model_specs(config), pose_model_spec(config))
+    specs = (
+        *identity_model_specs(config),
+        pose_model_spec(config),
+        emotion_model_spec(config),
+    )
     for spec in specs:
         if prepare_models:
             try:
@@ -62,7 +59,11 @@ def run_diagnostics(
         if not spec.path.exists():
             checks.append(DiagnosticCheck(spec.name, False, f"missing: {spec.path}"))
             continue
-        actual_hash = file_sha256(spec.path)
+        try:
+            actual_hash = file_sha256(spec.path)
+        except OSError as exc:
+            checks.append(DiagnosticCheck(spec.name, False, str(exc)))
+            continue
         checks.append(
             DiagnosticCheck(
                 spec.name,
@@ -104,6 +105,25 @@ def _check_packages() -> DiagnosticCheck:
     )
 
 
+def _check_opencv_face_apis() -> DiagnosticCheck:
+    try:
+        import cv2
+    except ImportError as exc:
+        return DiagnosticCheck("OpenCV face APIs", False, str(exc))
+
+    available = hasattr(cv2, "FaceDetectorYN_create") and hasattr(
+        cv2,
+        "FaceRecognizerSF_create",
+    )
+    return DiagnosticCheck(
+        "OpenCV face APIs",
+        available,
+        "YuNet and SFace APIs available"
+        if available
+        else "Install opencv-contrib-python",
+    )
+
+
 def _check_writable_directory(path: Path, name: str) -> DiagnosticCheck:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -113,3 +133,12 @@ def _check_writable_directory(path: Path, name: str) -> DiagnosticCheck:
         return DiagnosticCheck(name, True, str(path))
     except OSError as exc:
         return DiagnosticCheck(name, False, str(exc))
+
+
+def _check_readable_file(path: Path, name: str) -> DiagnosticCheck:
+    try:
+        with path.open("rb") as source:
+            source.read(1)
+    except OSError as exc:
+        return DiagnosticCheck(name, False, str(exc))
+    return DiagnosticCheck(name, True, str(path))

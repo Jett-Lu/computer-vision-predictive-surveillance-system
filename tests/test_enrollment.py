@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,10 +10,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from enrollment import (
+    EnrollmentSession,
     MenuState,
     handle_delete_state,
+    handle_enrollment_state,
     sanitize_enrollment_label,
     validate_enrollment_frame,
+    _remove_enrollment_folder,
 )
 from identity import DetectedFace
 
@@ -33,6 +37,27 @@ class EnrollmentInputTest(unittest.TestCase):
     def test_sanitize_enrollment_label_rejects_empty_or_dot_only_names(self) -> None:
         self.assertEqual(sanitize_enrollment_label("..."), "")
 
+    def test_sanitize_enrollment_label_preserves_spaces(self) -> None:
+        self.assertEqual(sanitize_enrollment_label("Taylor Brooks"), "Taylor Brooks")
+
+    def test_sanitize_enrollment_label_rejects_reserved_windows_names(self) -> None:
+        self.assertEqual(sanitize_enrollment_label("CON.txt"), "")
+
+    def test_enrollment_state_preserves_the_display_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = EnrollmentSession()
+
+            state, error = handle_enrollment_state(
+                MenuState.ENROLL_GET_NAME,
+                "Taylor Brooks",
+                session,
+                Path(temp_dir),
+            )
+
+        self.assertEqual(state, MenuState.ENROLL_GET_COUNT)
+        self.assertEqual(error, "")
+        self.assertEqual(session.label, "Taylor Brooks")
+
 
 class DeleteInputTest(unittest.TestCase):
     def test_delete_selection_rejects_index_equal_to_length(self) -> None:
@@ -43,6 +68,18 @@ class DeleteInputTest(unittest.TestCase):
 
         self.assertEqual(state, MenuState.DELETE_CHOOSE)
         self.assertIn("out of range", error)
+
+    def test_delete_rejects_a_folder_outside_the_enrollment_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "enrollments"
+            outside = Path(temp_dir) / "outside"
+            root.mkdir()
+            outside.mkdir()
+
+            with self.assertRaises(ValueError):
+                _remove_enrollment_folder(outside, root)
+
+            self.assertTrue(outside.exists())
 
 
 class EnrollmentQualityIdentifierStub:

@@ -17,9 +17,6 @@ dependencies = [
     "lap>=0.5.13,<0.6",
 ]
 
-[project.scripts]
-monitor-poc = "main:main"
-
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = [

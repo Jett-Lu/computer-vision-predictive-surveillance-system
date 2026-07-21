@@ -8,6 +8,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 import json
+import math
+import os
 
 import cv2
 
@@ -41,39 +43,60 @@ def run_validation(
     """Process every manifest case and optionally write a machine-readable report."""
     manifest_path = manifest_path.resolve()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Validation manifest must be a JSON object.")
     cases = payload.get("cases", [])
     if not isinstance(cases, list) or not cases:
         raise ValueError("Validation manifest must contain a non-empty 'cases' list.")
+    if any(not isinstance(case, dict) for case in cases):
+        raise ValueError("Every validation case must be a JSON object.")
 
     runtime_config = config or AppConfig.from_env()
     processor = MonitoringProcessor(runtime_config)
     results: list[ValidationResult] = []
     try:
         for case in cases:
-            results.append(
-                _run_case(
-                    case,
-                    manifest_path.parent,
-                    processor,
+            try:
+                results.append(
+                    _run_case(
+                        case,
+                        manifest_path.parent,
+                        processor,
+                    )
                 )
-            )
+            except (TypeError, ValueError) as exc:
+                results.append(
+                    ValidationResult(
+                        str(case.get("name") or "unnamed case"),
+                        False,
+                        (f"invalid case: {exc}",),
+                        None,
+                    )
+                )
     finally:
         processor.close()
 
     if report_path is not None:
         report_path = report_path.resolve()
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(
-            json.dumps(
-                {
-                    "passed": all(result.passed for result in results),
-                    "results": [asdict(result) for result in results],
-                },
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        temporary_path = report_path.with_name(
+            f"{report_path.name}.tmp-{os.getpid()}"
         )
+        try:
+            temporary_path.write_text(
+                json.dumps(
+                    {
+                        "passed": all(result.passed for result in results),
+                        "results": [asdict(result) for result in results],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary_path, report_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
     return results
 
 
@@ -83,6 +106,9 @@ def evaluate_metrics(
 ) -> tuple[str, ...]:
     """Return human-readable acceptance failures for one measured scenario."""
     failures: list[str] = []
+    if metrics.frames_processed == 0:
+        failures.append("input contained no readable frames")
+
     minimum_people = int(case.get("min_people", 0))
     if metrics.max_people < minimum_people:
         failures.append(
@@ -97,17 +123,19 @@ def evaluate_metrics(
         )
 
     observed = set(metrics.observed_identities)
-    expected_identities = set(case.get("expected_identities", []))
+    expected_identities = _identity_set(case, "expected_identities")
     missing = sorted(expected_identities - observed)
     if missing:
         failures.append(f"expected identities not observed: {', '.join(missing)}")
 
-    forbidden_identities = set(case.get("forbidden_identities", []))
+    forbidden_identities = _identity_set(case, "forbidden_identities")
     unexpected = sorted(forbidden_identities & observed)
     if unexpected:
         failures.append(f"forbidden identities observed: {', '.join(unexpected)}")
 
     maximum_high_ratio = float(case.get("max_high_frame_ratio", 1.0))
+    if not 0.0 <= maximum_high_ratio <= 1.0:
+        raise ValueError("max_high_frame_ratio must be between 0 and 1")
     high_frames = metrics.tier_counts.get("HIGH", 0)
     high_ratio = high_frames / max(1, metrics.frames_processed)
     if high_ratio > maximum_high_ratio:
@@ -179,7 +207,7 @@ def _run_case(
         if not capture.isOpened():
             return ValidationResult(name, False, ("OpenCV could not open input",), None)
         fps = capture.get(cv2.CAP_PROP_FPS)
-        fps = fps if fps > 0 else 24.0
+        fps = fps if math.isfinite(fps) and fps > 0 else 24.0
         try:
             while frames_processed < max_frames:
                 ok, frame = capture.read()
@@ -222,5 +250,13 @@ def _collect_snapshots(
     for snapshot in snapshots:
         if snapshot.identity_confirmed:
             identities.add(snapshot.identity_name)
-        tiers[snapshot.tier_label] += 1
+    for tier_label in {snapshot.tier_label for snapshot in snapshots}:
+        tiers[tier_label] += 1
     return people_total, max_people
+
+
+def _identity_set(case: dict[str, Any], field_name: str) -> set[str]:
+    values = case.get(field_name, [])
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise ValueError(f"{field_name} must be a list of names")
+    return set(values)

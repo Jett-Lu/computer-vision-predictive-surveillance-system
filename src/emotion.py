@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict, deque
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
+import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TMP_DIR = PROJECT_ROOT / ".tmp"
@@ -11,12 +13,17 @@ os.environ.setdefault("MPLCONFIGDIR", str(TMP_DIR / "matplotlib"))
 
 import cv2
 import mediapipe as mp
+import numpy as np
 from emotiefflib.facial_analysis import EmotiEffLibRecognizer
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+from config import DEFAULT_CONFIG
+from model_manager import EMOTION_MODEL_SHA256, file_sha256
+
 
 DEFAULT_FACE_MODEL_PATH = PROJECT_ROOT / "data" / "blaze_face_short_range.tflite"
+DEFAULT_CLASSIFIER_MODEL_PATH = DEFAULT_CONFIG.emotion_classifier_model_path
 FACE_PADDING_RATIO = 0.12
 
 
@@ -26,11 +33,59 @@ class FaceEmotionResult:
     keypoints: tuple[tuple[int, int], ...]
     label: str
     confidence: float
+    uncertain: bool = False
+
+    @property
+    def display_label(self) -> str:
+        return f"{self.label}?" if self.uncertain else self.label
 
 
-def display_emotion_label(label: str, confidence: float, threshold: float) -> str:
-    """Return a cautious display label for a probabilistic expression estimate."""
-    return label if confidence >= threshold else "Uncertain"
+@dataclass
+class EmotionSmoother:
+    """Stabilize per-person expression labels over a short rolling window."""
+
+    window_seconds: float = 0.8
+    uncertainty_threshold: float = 0.45
+    _observations: deque[tuple[float, FaceEmotionResult]] = field(
+        default_factory=deque,
+        init=False,
+    )
+
+    def update(
+        self,
+        result: FaceEmotionResult | None,
+        timestamp: float,
+    ) -> FaceEmotionResult | None:
+        if result is None:
+            self._observations.clear()
+            return None
+
+        self._observations.append((timestamp, result))
+        while (
+            self._observations
+            and timestamp - self._observations[0][0] > self.window_seconds
+        ):
+            self._observations.popleft()
+
+        weights: defaultdict[str, float] = defaultdict(float)
+        latest_index: dict[str, int] = {}
+        for index, (_, observation) in enumerate(self._observations):
+            weights[observation.label] += observation.confidence
+            latest_index[observation.label] = index
+
+        label = max(weights, key=lambda item: (weights[item], latest_index[item]))
+        matching_confidences = [
+            observation.confidence
+            for _, observation in self._observations
+            if observation.label == label
+        ]
+        confidence = sum(matching_confidences) / len(matching_confidences)
+        return replace(
+            result,
+            label=label,
+            confidence=confidence,
+            uncertain=confidence < self.uncertainty_threshold,
+        )
 
 
 class FaceEmotionAnalyzer:
@@ -39,11 +94,22 @@ class FaceEmotionAnalyzer:
     def __init__(
         self,
         model_path: Path = DEFAULT_FACE_MODEL_PATH,
+        classifier_model_path: Path = DEFAULT_CLASSIFIER_MODEL_PATH,
         min_display_confidence: float = 0.45,
     ) -> None:
         if not model_path.exists():
             raise FileNotFoundError(f"Face detector model not found: {model_path}")
+        if not classifier_model_path.exists():
+            raise FileNotFoundError(
+                f"Expression classifier model not found: {classifier_model_path}"
+            )
 
+        _sync_emotiefflib_cache(classifier_model_path)
+        self.recognizer = EmotiEffLibRecognizer(
+            engine="onnx",
+            model_name="enet_b2_8",
+            device="cpu",
+        )
         base_options = python.BaseOptions(model_asset_path=str(model_path))
         detector_options = vision.FaceDetectorOptions(
             base_options=base_options,
@@ -51,21 +117,23 @@ class FaceEmotionAnalyzer:
         )
         self.detector = vision.FaceDetector.create_from_options(detector_options)
         self.min_display_confidence = min_display_confidence
-        self.recognizer = EmotiEffLibRecognizer(
-            engine="onnx",
-            model_name="enet_b2_8",
-            device="cpu",
-        )
 
     def analyze(
         self,
-        frame,
+        frame: np.ndarray,
         person_box: tuple[int, int, int, int] | None,
     ) -> FaceEmotionResult | None:
         if person_box is None:
             return None
 
+        frame_height, frame_width = frame.shape[:2]
         x1, y1, x2, y2 = person_box
+        x1 = max(0, min(frame_width, x1))
+        x2 = max(0, min(frame_width, x2))
+        y1 = max(0, min(frame_height, y1))
+        y2 = max(0, min(frame_height, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return None
@@ -99,11 +167,6 @@ class FaceEmotionAnalyzer:
         emotion_index = int(scores[0].argmax())
         label = self.recognizer.idx_to_emotion_class[emotion_index]
         confidence = float(scores[0][emotion_index])
-        label = display_emotion_label(
-            label,
-            confidence,
-            self.min_display_confidence,
-        )
         keypoints = tuple(
             (int(keypoint.x * crop_width) + x1, int(keypoint.y * crop_height) + y1)
             for keypoint in face.keypoints
@@ -114,6 +177,7 @@ class FaceEmotionAnalyzer:
             keypoints=keypoints,
             label=label,
             confidence=confidence,
+            uncertain=confidence < self.min_display_confidence,
         )
 
     def close(self) -> None:
@@ -134,3 +198,18 @@ class FaceEmotionAnalyzer:
             min(width, x2 + pad_x),
             min(height, y2 + pad_y),
         )
+
+
+def _sync_emotiefflib_cache(model_path: Path) -> None:
+    """Place the verified model where EmotiEffLib expects to find it."""
+    cache_path = Path.home() / ".emotiefflib" / model_path.name
+    if cache_path.exists() and file_sha256(cache_path) == EMOTION_MODEL_SHA256:
+        return
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = cache_path.with_name(f"{cache_path.name}.tmp-{os.getpid()}")
+    try:
+        shutil.copyfile(model_path, temporary_path)
+        os.replace(temporary_path, cache_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)

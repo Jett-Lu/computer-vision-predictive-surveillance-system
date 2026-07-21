@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
 import os
 import time
 
@@ -17,7 +17,13 @@ from config import AppConfig, DEFAULT_CONFIG
 from events import EventRecorder, TrackSnapshot, session_event_path
 from identity import IdentityConsensus, KnownIdentity, OpenCVFaceIdentifier, offset_box
 from logging_setup import configure_logging, get_logger
-from model_manager import ModelUnavailableError, ensure_models, identity_model_specs
+from model_manager import (
+    ModelUnavailableError,
+    emotion_model_spec,
+    ensure_model,
+    ensure_models,
+    identity_model_specs,
+)
 from review import HIGH_COLOR, ReviewState
 
 
@@ -26,7 +32,6 @@ TMP_DIR = DEFAULT_CONFIG.project_root / ".tmp"
 os.environ.setdefault("YOLO_CONFIG_DIR", str(TMP_DIR / "ultralytics"))
 
 logger = get_logger("detection")
-EXPRESSION_SCORE_ALPHA = 0.35
 _AUTO = object()
 
 
@@ -37,6 +42,7 @@ class PersonRuntime:
     wave_monitor: Any
     review_monitor: Any
     identity_consensus: IdentityConsensus
+    emotion_smoother: Any = None
     cached_emotion: Any = None
     cached_face_box: tuple[int, int, int, int] | None = None
     last_face_seen_frame: int = -1
@@ -108,19 +114,6 @@ class NoOpTimer:
         pass
 
 
-def _face_centre_inside_box(
-    face_box: tuple[int, int, int, int],
-    person_box: tuple[int, int, int, int] | None,
-) -> bool:
-    if person_box is None:
-        return False
-    fx1, fy1, fx2, fy2 = face_box
-    px1, py1, px2, py2 = person_box
-    cx = (fx1 + fx2) // 2
-    cy = (fy1 + fy2) // 2
-    return px1 <= cx <= px2 and py1 <= cy <= py2
-
-
 def _track_key(
     track_id: int | None,
     detection_index: int,
@@ -189,11 +182,21 @@ class MonitoringProcessor:
         from review import ReviewLevelMonitor
 
         logger.info("Loading multi-person pose model")
-        self.pose_analyzer = pose_analyzer or PoseAnalyzer(
-            model_path=self.config.pose_model_path,
-            config=self.config,
+        self.pose_analyzer = (
+            pose_analyzer
+            if pose_analyzer is not None
+            else PoseAnalyzer(
+                model_path=self.config.pose_model_path,
+                config=self.config,
+            )
         )
         self.emotion_analyzer = self._prepare_emotion_analyzer(emotion_analyzer)
+        if self.emotion_analyzer is not None:
+            from emotion import EmotionSmoother
+
+            self.emotion_smoother_type = EmotionSmoother
+        else:
+            self.emotion_smoother_type = None
         self.wave_monitor_type = RightHandWaveMonitor
         self.review_monitor_type = ReviewLevelMonitor
         self.person_states: dict[int, PersonRuntime] = {}
@@ -202,8 +205,8 @@ class MonitoringProcessor:
         )
         if self.demo_high_review_names:
             logger.warning(
-                "DEMO override enabled for: %s",
-                ", ".join(sorted(self.demo_high_review_names)),
+                "DEMO override enabled for %s enrolled name(s)",
+                len(self.demo_high_review_names),
             )
 
         if event_recorder is not None:
@@ -267,7 +270,7 @@ class MonitoringProcessor:
                 timestamp,
             )
 
-            expression_event_counted = False
+            context_activated = False
             if self.frame_count % self.config.expression_interval_frames == 0:
                 detected_emotion = None
                 if self.emotion_analyzer is not None:
@@ -276,18 +279,21 @@ class MonitoringProcessor:
                             frame,
                             pose_result.box,
                         )
-                expression_event_counted = runtime.review_monitor.observe_expression(
-                    detected_emotion.label if detected_emotion is not None else None,
-                    detected_emotion.confidence if detected_emotion is not None else None,
-                    timestamp,
+                runtime.cached_emotion = (
+                    runtime.emotion_smoother.update(detected_emotion, timestamp)
+                    if runtime.emotion_smoother is not None
+                    else None
                 )
-                runtime.cached_emotion = _smooth_emotion(
-                    runtime.cached_emotion,
-                    detected_emotion,
-                    type(detected_emotion) if detected_emotion is not None else None,
+                context_activated = runtime.review_monitor.observe_expression(
+                    runtime.cached_emotion.label
+                    if runtime.cached_emotion is not None
+                    else None,
+                    runtime.cached_emotion.confidence
+                    if runtime.cached_emotion is not None
+                    else None,
                 )
 
-            review_state = runtime.review_monitor.update(wave_state, timestamp)
+            review_state = runtime.review_monitor.update(wave_state)
             with self.timer("identity"):
                 identity_overlay = _resolve_identity_overlay(
                     frame=frame,
@@ -323,7 +329,7 @@ class MonitoringProcessor:
                     pose_result.box,
                     review_state,
                     wave_state.wave_detected,
-                    expression_event_counted,
+                    context_activated,
                 )
                 _draw_identity_overlay(
                     annotated,
@@ -341,16 +347,12 @@ class MonitoringProcessor:
                 review_score=review_state.score,
                 wave_count=review_state.recent_wave_count,
                 expression_label=review_state.concern_label,
-                expression_confidence=(
-                    review_state.concern_strength
-                    if review_state.concern_expression_active
-                    else None
-                ),
                 expression_context_strength=review_state.concern_strength,
                 demo_override=demo_override,
             )
             snapshots.append(snapshot)
-            self.event_recorder.record(snapshot, timestamp, self.frame_count)
+            if pose_result.track_id is not None:
+                self.event_recorder.record(snapshot, timestamp, self.frame_count)
 
         stale_keys = _discard_stale_tracks(
             self.person_states,
@@ -379,15 +381,21 @@ class MonitoringProcessor:
         self.last_snapshots = []
         self.frame_count = 0
         self._timestamp_origin = None
+        self._last_frame_clock = None
+        self._fps = 0.0
         reset_pose_tracking = getattr(self.pose_analyzer, "reset_tracking", None)
         if callable(reset_pose_tracking):
             reset_pose_tracking()
+        if "source" in event_context:
+            event_context["source"] = _source_for_logging(event_context["source"])
         self.event_recorder.reset_tracks(**event_context)
 
     def close(self) -> None:
-        if self.emotion_analyzer is not None:
-            self.emotion_analyzer.close()
-        self.event_recorder.close()
+        try:
+            if self.emotion_analyzer is not None:
+                self.emotion_analyzer.close()
+        finally:
+            self.event_recorder.close()
 
     def _prepare_identity_matcher(self, supplied_matcher: Any) -> Any:
         if supplied_matcher is not _AUTO:
@@ -412,12 +420,15 @@ class MonitoringProcessor:
         try:
             from emotion import FaceEmotionAnalyzer
 
+            ensure_model(emotion_model_spec(self.config), self.config)
             return FaceEmotionAnalyzer(
                 self.config.emotion_face_model_path,
+                classifier_model_path=self.config.emotion_classifier_model_path,
                 min_display_confidence=self.config.min_expression_display_confidence,
             )
         except Exception as exc:
             logger.warning("Expression analysis disabled: %s", exc)
+            logger.debug("Expression analyzer initialization failed", exc_info=True)
             return None
 
     def _new_person_runtime(self) -> PersonRuntime:
@@ -430,6 +441,14 @@ class MonitoringProcessor:
                 window_size=self.config.identity_consensus_window,
                 required_matches=self.config.identity_required_matches,
                 ttl_frames=self.config.identity_ttl_frames,
+            ),
+            emotion_smoother=(
+                self.emotion_smoother_type(
+                    window_seconds=self.config.expression_smoothing_seconds,
+                    uncertainty_threshold=self.config.min_expression_display_confidence,
+                )
+                if self.emotion_smoother_type is not None
+                else None
             ),
         )
 
@@ -460,7 +479,7 @@ def run_detection(source: int | str = 0, config: AppConfig | None = None) -> Non
     configure_logging(runtime_config.log_level, runtime_config.log_dir)
     capture = open_capture(source)
     if not capture.isOpened():
-        logger.error("Could not open camera source %s", source)
+        logger.error("Could not open camera source %s", _source_for_logging(source))
         return
 
     processor: MonitoringProcessor | None = None
@@ -488,28 +507,6 @@ def run_detection(source: int | str = 0, config: AppConfig | None = None) -> Non
             processor.close()
         cv2.destroyAllWindows()
         cv2.waitKey(1)
-
-
-def _smooth_emotion(
-    cached_emotion: Any,
-    detected_emotion: Any,
-    emotion_result_type: Any,
-) -> Any:
-    if detected_emotion is None:
-        return None
-    if cached_emotion is None or cached_emotion.label != detected_emotion.label:
-        return detected_emotion
-
-    smoothed_confidence = (
-        EXPRESSION_SCORE_ALPHA * detected_emotion.confidence
-        + (1 - EXPRESSION_SCORE_ALPHA) * cached_emotion.confidence
-    )
-    return emotion_result_type(
-        box=detected_emotion.box,
-        keypoints=detected_emotion.keypoints,
-        label=detected_emotion.label,
-        confidence=smoothed_confidence,
-    )
 
 
 def _discard_stale_tracks(
@@ -543,7 +540,8 @@ def _resolve_identity_overlay(
 ) -> IdentityOverlay:
     fallback_box = runtime.cached_emotion.box if runtime.cached_emotion is not None else person_box
     if identity_matcher is None or not known_identities:
-        return IdentityOverlay("Person", fallback_box, _label_with_emotion("Person", None, runtime.cached_emotion))
+        label = _label_with_emotion("Person", None, runtime.cached_emotion)
+        return IdentityOverlay("Person", fallback_box, label)
 
     due = (
         runtime.cached_face_box is None
@@ -566,7 +564,7 @@ def _resolve_identity_overlay(
                 match = identity_matcher.identify(
                     cropped_img,
                     detected_face,
-                    list(known_identities),
+                    known_identities,
                 )
             runtime.identity_consensus.observe(match, frame_number)
 
@@ -576,7 +574,8 @@ def _resolve_identity_overlay(
         and frame_number - runtime.last_face_seen_frame <= identity_interval_frames * 2
     )
     if not face_visible:
-        return IdentityOverlay("Person", fallback_box, _label_with_emotion("Person", None, runtime.cached_emotion))
+        label = _label_with_emotion("Person", None, runtime.cached_emotion)
+        return IdentityOverlay("Person", fallback_box, label)
 
     name = decision.name if decision.confirmed else "Unknown"
     face_box = runtime.cached_face_box or fallback_box
@@ -595,8 +594,28 @@ def _label_with_emotion(name: str, score: float | None, emotion: Any) -> str:
     if score is not None and name not in {"Person", "Unknown"}:
         label = f"{name} {score:.2f}"
     if emotion is not None:
-        label = f"{label} | {emotion.label} {emotion.confidence:.2f}"
+        label = f"{label} | {emotion.display_label} {emotion.confidence:.0%}"
     return label
+
+
+def _source_for_logging(source: object) -> str:
+    """Remove URL credentials and query parameters from operator logs."""
+    value = str(source)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<invalid source URL>"
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        port = ""
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
 def _draw_review_overlay(
@@ -604,13 +623,13 @@ def _draw_review_overlay(
     person_box: tuple[int, int, int, int],
     review_state: ReviewState,
     wave_detected: bool,
-    expression_event_counted: bool,
+    context_activated: bool,
 ) -> None:
     px1, py1, px2, py2 = person_box
     cv2.rectangle(frame, (px1, py1), (px2, py2), review_state.color, 3)
     status_lines = [
         review_state.tier_label,
-        f"waves:{review_state.recent_wave_count} | expr:{review_state.concern_strength:.0%}",
+        f"waves:{review_state.recent_wave_count} | context:{review_state.concern_strength:.0%}",
     ]
     if review_state.concern_expression_active:
         status_lines.append(
@@ -620,7 +639,7 @@ def _draw_review_overlay(
 
     if wave_detected:
         message = "Right-hand wave counted"
-    elif expression_event_counted:
+    elif context_activated:
         message = "Expression context active"
     else:
         return

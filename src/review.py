@@ -26,7 +26,6 @@ class ReviewState:
     color: tuple[int, int, int]
     score: float
     recent_wave_count: int
-    expression_multiplier: float
     concern_strength: float
     concern_label: str | None
 
@@ -41,7 +40,6 @@ class ReviewLevelMonitor:
 
     wave_allowance: int = 2
     concern_smoothing_alpha: float = 0.35
-    max_multiplier_increase: float = 0.50
     min_concern_confidence: float = 0.65
     _concern_strength: float = field(default=0.0, init=False)
     _concern_label: str | None = field(default=None, init=False)
@@ -50,7 +48,6 @@ class ReviewLevelMonitor:
         self,
         label: str | None,
         confidence: float | None,
-        timestamp: float | None = None,
     ) -> bool:
         """Update the live concern signal and report when it first becomes visible."""
         previously_active = self._concern_strength > 0.0
@@ -81,10 +78,8 @@ class ReviewLevelMonitor:
     def update(
         self,
         wave_state: WaveAlertState,
-        timestamp: float | None = None,
     ) -> ReviewState:
         behavior_score = max(0, wave_state.recent_wave_count - self.wave_allowance)
-        multiplier = 1.0 + self.max_multiplier_increase * self._concern_strength
         score = float(behavior_score)
 
         if score == 0:
@@ -105,7 +100,6 @@ class ReviewLevelMonitor:
             color=color,
             score=score,
             recent_wave_count=wave_state.recent_wave_count,
-            expression_multiplier=multiplier,
             concern_strength=self._concern_strength,
             concern_label=self._concern_label if self._concern_strength > 0.0 else None,
         )

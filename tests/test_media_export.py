@@ -24,6 +24,13 @@ class MediaExportHelpersTest(unittest.TestCase):
                 [folder / "clip.mp4", folder / "photo.jpg"],
             )
 
+    def test_missing_file_path_is_not_created_as_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_file = Path(temp_dir) / "missing.mp4"
+
+            self.assertEqual(discover_media_files(missing_file), [])
+            self.assertFalse(missing_file.exists())
+
     def test_annotated_output_path_keeps_image_format(self) -> None:
         self.assertEqual(
             annotated_output_path(Path("input/photo.png"), Path("output")),

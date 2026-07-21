@@ -32,7 +32,9 @@ class ModelSpec:
 FACE_DETECTOR_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 FACE_RECOGNIZER_SHA256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
 POSE_MODEL_SHA256 = "c6fa93dd1ee4a2c18c900a45c1d864a1c6f7aba75d84f91648a30b7fb641d212"
+EMOTION_MODEL_SHA256 = "180a9d4845b59393de4511598a0d1d34b705034691ea32959ce5009db7cf52b7"
 OPENCV_ZOO_REVISION = "47534e27c9851bb1128ccc0102f1145e27f23f98"
+EMOTIEFFLIB_REVISION = "95d1a227cac48e31f9557acb96afed455695c09b"
 
 
 def identity_model_specs(config: AppConfig) -> tuple[ModelSpec, ModelSpec]:
@@ -63,6 +65,16 @@ def pose_model_spec(config: AppConfig) -> ModelSpec:
     )
 
 
+def emotion_model_spec(config: AppConfig) -> ModelSpec:
+    return ModelSpec(
+        "EmotiEffLib expression model",
+        config.emotion_classifier_model_path,
+        f"https://raw.githubusercontent.com/sb-ai-lab/EmotiEffLib/"
+        f"{EMOTIEFFLIB_REVISION}/models/affectnet_emotions/onnx/enet_b2_8.onnx",
+        EMOTION_MODEL_SHA256,
+    )
+
+
 def ensure_models(specs: tuple[ModelSpec, ...], config: AppConfig) -> None:
     for spec in specs:
         ensure_model(spec, config)
@@ -70,17 +82,27 @@ def ensure_models(specs: tuple[ModelSpec, ...], config: AppConfig) -> None:
 
 def ensure_model(spec: ModelSpec, config: AppConfig) -> Path:
     """Return a verified model path, downloading atomically when permitted."""
-    if spec.path.exists() and file_sha256(spec.path) == spec.sha256:
-        logger.info("Model ready: %s", spec.name)
-        return spec.path
+    verification_error: OSError | None = None
+    if spec.path.exists():
+        try:
+            if file_sha256(spec.path) == spec.sha256.casefold():
+                logger.info("Model ready: %s", spec.name)
+                return spec.path
+        except OSError as exc:
+            verification_error = exc
 
     if not config.allow_model_downloads:
         raise ModelUnavailableError(
             f"{spec.name} is missing or invalid at {spec.path}. "
             "Model downloads are disabled."
-        )
+        ) from verification_error
 
-    spec.path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        spec.path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ModelUnavailableError(
+            f"Could not create the model directory for {spec.name}: {spec.path.parent}"
+        ) from exc
     last_error: Exception | None = None
     for attempt in range(1, config.model_download_attempts + 1):
         temporary_path = spec.path.with_name(f"{spec.path.name}.download-{os.getpid()}")

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 
-from camera import normalize_camera_source
 from config import AppConfig
 
 
@@ -98,6 +97,8 @@ def main() -> None:
 
         checks = run_diagnostics(config, prepare_models=args.prepare_models)
         print_diagnostics(checks)
+        if not all(check.passed for check in checks):
+            raise SystemExit(1)
         return
     if args.validate:
         from pathlib import Path
@@ -117,6 +118,7 @@ def main() -> None:
         export_media(Path(args.input), Path(args.output_dir), config=config)
         return
     if args.detect:
+        from camera import normalize_camera_source
         from detection import run_detection
 
         run_detection(source=normalize_camera_source(args.source), config=config)
@@ -124,7 +126,7 @@ def main() -> None:
 
     from enrollment import main as menu_main
 
-    menu_main()
+    menu_main(config)
 
 
 if __name__ == "__main__":

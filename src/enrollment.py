@@ -18,6 +18,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENROLLMENTS_DIR = PROJECT_ROOT / "enrollments"
 PAGE_SIZE = 5
 INVALID_LABEL_CHARS = set('<>:"/\\|?*')
+MAX_LABEL_LENGTH = 80
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 RED_TEXT = "\033[91m"
 RESET_TEXT = "\033[0m"
 
@@ -76,14 +85,20 @@ class DeleteSession:
     selected_name: str = ""
 
 
-def enrollment_folders() -> list[str]:
-    ENROLLMENTS_DIR.mkdir(exist_ok=True)
-    return sorted(path.name for path in ENROLLMENTS_DIR.iterdir() if path.is_dir())
+def enrollment_folders(enrollments_dir: Path = ENROLLMENTS_DIR) -> list[str]:
+    enrollments_dir.mkdir(parents=True, exist_ok=True)
+    return sorted(path.name for path in enrollments_dir.iterdir() if path.is_dir())
 
 
 def sanitize_enrollment_label(value: str) -> str:
-    label = "".join(char for char in value.strip() if char not in INVALID_LABEL_CHARS)
-    return label.strip(". ")
+    label = "".join(
+        char
+        for char in value.strip()
+        if char not in INVALID_LABEL_CHARS and ord(char) >= 32
+    ).strip(". ")[:MAX_LABEL_LENGTH].strip(". ")
+    if not label or label.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        return ""
+    return label
 
 
 def clear_terminal() -> None:
@@ -93,7 +108,7 @@ def clear_terminal() -> None:
 def prompt_user(error_message: str = "") -> str:
     if error_message:
         print(f"{RED_TEXT}{error_message}{RESET_TEXT}")
-    return input(">> ").strip().lower().replace(" ", "")
+    return input(">> ").strip()
 
 
 def display_state(state: MenuState, delete_session: DeleteSession) -> None:
@@ -194,7 +209,7 @@ def capture_enrollment_images(
                 )
                 quality_color = (0, 180, 0) if accepted else (0, 0, 255)
                 if accepted:
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     image_path = session.folder / f"{session.label}_{count}_{timestamp}.jpg"
                     if cv2.imwrite(str(image_path), frame):
                         count += 1
@@ -272,12 +287,14 @@ def handle_enrollment_state(
     state: MenuState,
     command: str,
     session: EnrollmentSession,
+    enrollments_dir: Path = ENROLLMENTS_DIR,
 ) -> tuple[MenuState, str]:
-    if command == "exit":
+    normalized_command = command.strip().casefold()
+    if normalized_command == "exit":
         return MenuState.MENU, ""
 
     if state == MenuState.ENROLL_GET_NAME:
-        if command == "q":
+        if normalized_command == "q":
             return state, "Enter a name for the person you want to enroll."
 
         label = sanitize_enrollment_label(command)
@@ -285,7 +302,7 @@ def handle_enrollment_state(
             return state, "Enter a valid name using letters or numbers."
 
         session.label = label
-        session.folder = ENROLLMENTS_DIR / label
+        session.folder = enrollments_dir / label
         if not session.folder.exists():
             session.folder.mkdir(parents=True)
             return MenuState.ENROLL_GET_COUNT, ""
@@ -295,10 +312,13 @@ def handle_enrollment_state(
         if session.folder is None:
             return MenuState.MENU, "Enrollment folder is missing. Returning to menu."
 
-        if command == "a":
-            shutil.rmtree(session.folder)
+        if normalized_command == "a":
+            try:
+                _remove_enrollment_folder(session.folder, enrollments_dir)
+            except (OSError, ValueError) as exc:
+                return state, f"Could not safely overwrite enrollment: {exc}"
             session.folder.mkdir(parents=True, exist_ok=True)
-        elif command != "b":
+        elif normalized_command != "b":
             return state, "Invalid command. Choose 'a' or 'b'."
         return MenuState.ENROLL_GET_COUNT, ""
 
@@ -315,7 +335,11 @@ def handle_enrollment_state(
         return MenuState.ENROLL_CAPTURE, ""
 
     if state == MenuState.ENROLL_ABORT:
-        return (MenuState.ENROLL_CAPTURE if command == "a" else MenuState.MENU), ""
+        return (
+            MenuState.ENROLL_CAPTURE
+            if normalized_command == "a"
+            else MenuState.MENU
+        ), ""
 
     return MenuState.MENU, ""
 
@@ -324,19 +348,21 @@ def handle_delete_state(
     state: MenuState,
     command: str,
     delete_session: DeleteSession,
+    enrollments_dir: Path = ENROLLMENTS_DIR,
 ) -> tuple[MenuState, str]:
-    delete_session.names = enrollment_folders()
-    if command == "q":
+    normalized_command = command.strip().casefold()
+    delete_session.names = enrollment_folders(enrollments_dir)
+    if normalized_command == "q":
         return state, "Enter 'exit' instead."
-    if command == "exit":
+    if normalized_command == "exit":
         return MenuState.MENU, ""
 
     if state == MenuState.DELETE_CHOOSE:
         max_page = max(0, math.ceil(len(delete_session.names) / PAGE_SIZE) - 1)
-        if command == "n":
+        if normalized_command == "n":
             delete_session.page_number = min(max_page, delete_session.page_number + 1)
             return state, ""
-        if command == "p":
+        if normalized_command == "p":
             delete_session.page_number = max(0, delete_session.page_number - 1)
             return state, ""
 
@@ -351,21 +377,24 @@ def handle_delete_state(
         return state, "Input is out of range. Choose from the provided list."
 
     if state == MenuState.DELETE_CONFIRM:
-        if command == "y":
-            selected_path = ENROLLMENTS_DIR / delete_session.selected_name
+        if normalized_command == "y":
+            selected_path = enrollments_dir / delete_session.selected_name
             if not selected_path.exists():
                 return MenuState.DELETE_ABORT, "Enrollment folder no longer exists."
-            shutil.rmtree(selected_path)
+            try:
+                _remove_enrollment_folder(selected_path, enrollments_dir)
+            except (OSError, ValueError) as exc:
+                return MenuState.DELETE_ABORT, f"Could not safely delete enrollment: {exc}"
             return MenuState.DELETE_COMPLETE, ""
-        if command == "n":
+        if normalized_command == "n":
             return MenuState.DELETE_ABORT, ""
         return state, "Invalid command. Enter either 'n' or 'y'."
 
     return MenuState.MENU, ""
 
 
-def main() -> None:
-    config = AppConfig.from_env()
+def main(config: AppConfig | None = None) -> None:
+    config = config or AppConfig.from_env()
     state = MenuState.MENU
     error = ""
     enrollment_session = EnrollmentSession()
@@ -385,38 +414,51 @@ def main() -> None:
 
         display_state(state, delete_session)
         command = prompt_user(error)
+        normalized_command = command.strip().casefold()
         error = ""
 
         if state in ENROLLMENT_STATES:
-            state, error = handle_enrollment_state(state, command, enrollment_session)
+            state, error = handle_enrollment_state(
+                state,
+                command,
+                enrollment_session,
+                config.enrollments_dir,
+            )
             continue
 
         if state in DELETE_STATES:
-            state, error = handle_delete_state(state, command, delete_session)
+            state, error = handle_delete_state(
+                state,
+                command,
+                delete_session,
+                config.enrollments_dir,
+            )
             continue
 
-        if command == "q" and state in {MenuState.MENU, MenuState.HELP}:
+        if normalized_command == "q" and state in {MenuState.MENU, MenuState.HELP}:
             break
-        if command == "help":
+        if normalized_command == "help":
             state = MenuState.HELP
-        elif command == "menu":
+        elif normalized_command == "menu":
             state = MenuState.MENU
-        elif command in {"enroll", "enrol"}:
+        elif normalized_command in {"enroll", "enrol"}:
             enrollment_session.reset()
             state = MenuState.ENROLL_GET_NAME
-        elif command == "delete":
-            delete_session = DeleteSession(names=enrollment_folders())
+        elif normalized_command == "delete":
+            delete_session = DeleteSession(
+                names=enrollment_folders(config.enrollments_dir)
+            )
             state = MenuState.DELETE_CHOOSE
-        elif command == "detect":
+        elif normalized_command == "detect":
             state = MenuState.DETECT
-        elif command == "doctor":
+        elif normalized_command == "doctor":
             from diagnostics import print_diagnostics, run_diagnostics
 
             clear_terminal()
             print_diagnostics(run_diagnostics(config))
             input("\nPress Enter to return to the menu...")
             state = MenuState.MENU
-        elif command == "export":
+        elif normalized_command == "export":
             from media_export import export_media
 
             clear_terminal()
@@ -425,6 +467,17 @@ def main() -> None:
             state = MenuState.MENU
         else:
             error = "Invalid command. Go to 'help' to see the list of commands."
+
+
+def _remove_enrollment_folder(folder: Path, enrollments_dir: Path) -> None:
+    root = enrollments_dir.resolve()
+    resolved = folder.resolve()
+    if resolved.parent != root:
+        raise ValueError("path is outside the enrollment directory")
+    if folder.is_symlink():
+        folder.unlink()
+    else:
+        shutil.rmtree(folder)
 
 
 if __name__ == "__main__":

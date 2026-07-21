@@ -114,13 +114,11 @@ class PoseAnalyzer:
                 frame_height=height,
                 min_score=self.min_keypoint_confidence,
             )
-            tracked_poses.append(
-                PoseResult(
-                    track_id=track_id,
-                    box=tuple(boxes.xyxy[index].int().tolist()),
-                    landmarks=landmarks,
-                )
-            )
+            raw_box = tuple(int(value) for value in boxes.xyxy[index].tolist())
+            box = _clamp_box(raw_box, width, height)
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            tracked_poses.append(PoseResult(track_id, box, landmarks))
 
         return tracked_poses
 
@@ -147,16 +145,6 @@ class PoseAnalyzer:
                 )
         return landmarks
 
-    def render(
-        self,
-        frame: np.ndarray,
-        landmarks: dict[int, tuple[float, float]],
-        color: tuple[int, int, int] = DEFAULT_SKELETON_COLOR,
-    ) -> np.ndarray:
-        annotated = frame.copy()
-        self.draw_landmarks(annotated, landmarks, color)
-        return annotated
-
     def draw_landmarks(
         self,
         frame: np.ndarray,
@@ -181,33 +169,23 @@ class PoseAnalyzer:
         if hasattr(self.model, "predictor"):
             self.model.predictor = None
 
-    def person_box(
-        self,
-        landmarks: dict[int, tuple[float, float]],
-        frame: np.ndarray,
-        padding_ratio: float = 0.08,
-    ) -> tuple[int, int, int, int] | None:
-        if not landmarks:
-            return None
-
-        height, width = frame.shape[:2]
-        xs = [point[0] for point in landmarks.values()]
-        ys = [point[1] for point in landmarks.values()]
-        left = max(0.0, min(xs) - padding_ratio)
-        top = max(0.0, min(ys) - padding_ratio)
-        right = min(1.0, max(xs) + padding_ratio)
-        bottom = min(1.0, max(ys) + padding_ratio)
-        return (
-            int(left * width),
-            int(top * height),
-            int(right * width),
-            int(bottom * height),
-        )
-
-
 def _as_numpy(value: Any) -> np.ndarray:
     if hasattr(value, "cpu"):
         value = value.cpu()
     if hasattr(value, "numpy"):
         value = value.numpy()
     return np.asarray(value)
+
+
+def _clamp_box(
+    box: tuple[int, int, int, int],
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = box
+    return (
+        max(0, min(frame_width, x1)),
+        max(0, min(frame_height, y1)),
+        max(0, min(frame_width, x2)),
+        max(0, min(frame_height, y2)),
+    )

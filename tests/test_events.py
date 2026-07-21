@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -23,7 +24,6 @@ def snapshot(tier: str = "CLEAR", waves: int = 0) -> TrackSnapshot:
         review_score=float(waves),
         wave_count=waves,
         expression_label=None,
-        expression_confidence=None,
         expression_context_strength=0.0,
     )
 
@@ -43,6 +43,27 @@ class EventRecorderTest(unittest.TestCase):
             [event["event_type"] for event in events],
             ["track_started", "tier_changed", "wave_counted"],
         )
+
+    def test_expression_event_reports_context_strength(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.jsonl"
+            recorder = EventRecorder(path)
+            recorder.record(snapshot(), 0.0, 0)
+            recorder.record(
+                replace(
+                    snapshot(),
+                    expression_label="Anger",
+                    expression_context_strength=0.30,
+                ),
+                1.0,
+                1,
+            )
+            recorder.close()
+
+            event = json.loads(path.read_text().splitlines()[-1])
+
+        self.assertEqual(event["event_type"], "expression_changed")
+        self.assertEqual(event["details"], {"label": "Anger", "strength": 0.3})
 
 
 if __name__ == "__main__":

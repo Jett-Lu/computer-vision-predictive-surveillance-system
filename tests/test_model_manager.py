@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -42,6 +43,22 @@ class ModelManagerTest(unittest.TestCase):
 
             with self.assertRaises(ModelUnavailableError):
                 ensure_model(spec, config)
+
+    def test_unreadable_model_fails_cleanly_when_downloads_are_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = Path(temp_dir) / "model.bin"
+            model_path.write_bytes(b"model")
+            spec = ModelSpec(
+                "test model",
+                model_path,
+                "https://invalid.example/model.bin",
+                "0" * 64,
+            )
+            config = replace(DEFAULT_CONFIG, allow_model_downloads=False)
+
+            with patch("model_manager.file_sha256", side_effect=OSError("denied")):
+                with self.assertRaises(ModelUnavailableError):
+                    ensure_model(spec, config)
 
 
 if __name__ == "__main__":

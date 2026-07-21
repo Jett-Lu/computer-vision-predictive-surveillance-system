@@ -25,6 +25,14 @@ class IdentityHelpersTest(unittest.TestCase):
 
         self.assertEqual(face_box(raw_face), (10, 20, 40, 61))
 
+    def test_face_box_is_clamped_to_the_image(self) -> None:
+        raw_face = np.array([-10.0, 20.0, 150.0, 100.0, *([0.0] * 10), 0.95])
+
+        self.assertEqual(
+            face_box(raw_face, image_width=100, image_height=80),
+            (0, 20, 100, 80),
+        )
+
     def test_offset_box_moves_crop_box_to_frame_coordinates(self) -> None:
         self.assertEqual(offset_box((5, 6, 30, 40), 100, 200), (105, 206, 130, 240))
 

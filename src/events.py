@@ -26,7 +26,6 @@ class TrackSnapshot:
     review_score: float
     wave_count: int
     expression_label: str | None
-    expression_confidence: float | None
     expression_context_strength: float
     demo_override: bool = False
 
@@ -131,7 +130,7 @@ class EventRecorder:
                     frame_number,
                     {
                         "label": snapshot.expression_label,
-                        "confidence": snapshot.expression_confidence,
+                        "strength": snapshot.expression_context_strength,
                     },
                     f"Track {snapshot.track_key}: expression {snapshot.expression_label}",
                 )
@@ -203,5 +202,5 @@ class EventRecorder:
 
 
 def session_event_path(event_dir: Path, prefix: str = "live") -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return event_dir / f"{prefix}_{timestamp}.jsonl"

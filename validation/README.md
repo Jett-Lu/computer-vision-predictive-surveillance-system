@@ -4,6 +4,9 @@ The validation runner turns recorded scenarios into repeatable pass/fail checks.
 Copy `manifest.example.json`, place consented test media in this folder, and
 adjust the expectations for the scene.
 
+Tier counts are frame based: a frame containing multiple people in the same
+tier is counted once for that tier.
+
 Run:
 
 ```powershell

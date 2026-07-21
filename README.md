@@ -30,6 +30,10 @@ are not already present. Identity is confirmed only after multiple agreeing
 frames, poor-quality faces are rejected, and confirmed names expire unless
 they are revalidated.
 
+The EmotiEffLib expression model is also downloaded from a pinned upstream
+revision and checksum-verified before it is loaded. Once the models have been
+prepared, `--no-model-downloads` provides a fully offline startup check.
+
 If no enrollments are available, the live monitoring demo continues
 anonymously.
 
@@ -45,10 +49,12 @@ Review color uses a fixed professional ladder:
 - `REVIEW` - orange
 - `HIGH` - red
 
-High-confidence `Anger`, `Contempt`, `Disgust`, `Fear`, and `Sadness`
-estimates appear as a separate, smoothed expression-context signal. Expression
-does not change the behavior-based review tier. It clears when the face is no
-longer visible.
+The best expression estimate remains visible even at lower confidence; a `?`
+marks a tentative label. Per-person estimates use a short rolling vote to
+reduce flicker. High-confidence `Anger`, `Contempt`, `Disgust`, `Fear`, and
+`Sadness` estimates also appear as a separate expression-context signal.
+Expression does not change the behavior-based review tier, and both the label
+and context clear when the face is no longer visible.
 
 This is a demo review indicator, not a conclusion that a person is suspicious
 or dangerous. Facial-expression estimates are uncertain and can reflect many
@@ -146,6 +152,8 @@ Common environment overrides include:
 - `MONITOR_ALLOW_MODEL_DOWNLOADS=false` for verified offline operation
 - `MONITOR_IDENTITY_THRESHOLD=0.363` for a calibrated SFace threshold
 - `MONITOR_EXPRESSION_CONFIDENCE=0.65` for expression context visibility
+- `MONITOR_EXPRESSION_DISPLAY_CONFIDENCE=0.45` for tentative `?` labels
+- `MONITOR_EXPRESSION_SMOOTHING_SECONDS=0.8` for display stability
 - `MONITOR_EVENT_LOGGING=false` to disable JSONL event reports
 - `MONITOR_DEBUG_TIMING=true` to log stage timings
 

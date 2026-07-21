@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import math
 import os
 
 
@@ -14,7 +15,12 @@ def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
-    return value.strip().casefold() in {"1", "true", "yes", "on"}
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -37,9 +43,12 @@ def _env_float(
     if value is None:
         return default
     try:
-        parsed = max(minimum, float(value))
+        parsed = float(value)
     except ValueError:
         return default
+    if not math.isfinite(parsed):
+        return default
+    parsed = max(minimum, parsed)
     return min(parsed, maximum) if maximum is not None else parsed
 
 
@@ -60,6 +69,7 @@ class AppConfig:
     model_download_attempts: int = 3
 
     expression_interval_frames: int = 5
+    expression_smoothing_seconds: float = 0.8
     identity_interval_frames: int = 8
     stale_track_frames: int = 90
     identity_consensus_window: int = 5
@@ -97,6 +107,10 @@ class AppConfig:
     def emotion_face_model_path(self) -> Path:
         return self.data_dir / "blaze_face_short_range.tflite"
 
+    @property
+    def emotion_classifier_model_path(self) -> Path:
+        return self.data_dir / "enet_b2_8.onnx"
+
     @classmethod
     def from_env(cls) -> "AppConfig":
         """Create configuration with safe environment-variable overrides."""
@@ -107,6 +121,9 @@ class AppConfig:
             ),
             model_download_attempts=_env_int("MONITOR_MODEL_DOWNLOAD_ATTEMPTS", 3),
             expression_interval_frames=_env_int("MONITOR_EXPRESSION_INTERVAL", 5),
+            expression_smoothing_seconds=_env_float(
+                "MONITOR_EXPRESSION_SMOOTHING_SECONDS", 0.8, minimum=0.1
+            ),
             identity_interval_frames=_env_int("MONITOR_IDENTITY_INTERVAL", 8),
             stale_track_frames=_env_int("MONITOR_STALE_TRACK_FRAMES", 90),
             identity_consensus_window=_env_int("MONITOR_IDENTITY_WINDOW", 5),

@@ -15,8 +15,8 @@ from detection import (
     PersonRuntime,
     _apply_demo_review_override,
     _discard_stale_tracks,
-    _face_centre_inside_box,
     _parse_demo_high_review_names,
+    _source_for_logging,
     _track_key,
 )
 from config import DEFAULT_CONFIG
@@ -47,12 +47,6 @@ class DetectionAssociationTest(unittest.TestCase):
         self.assertIn(4, person_states)
         self.assertEqual(stale, [3])
 
-    def test_face_is_associated_when_its_centre_is_inside_person_box(self) -> None:
-        self.assertTrue(_face_centre_inside_box((30, 20, 50, 40), (0, 0, 100, 100)))
-
-    def test_face_is_not_associated_when_person_box_is_missing(self) -> None:
-        self.assertFalse(_face_centre_inside_box((30, 20, 50, 40), None))
-
     def test_demo_high_review_names_are_parsed_case_insensitively(self) -> None:
         self.assertEqual(
             _parse_demo_high_review_names("Alex Chen; Priya Shah,  "),
@@ -60,7 +54,7 @@ class DetectionAssociationTest(unittest.TestCase):
         )
 
     def test_demo_high_review_override_only_changes_named_identity(self) -> None:
-        state = ReviewState("CLEAR", CLEAR_COLOR, 0.0, 0, 1.0, 0.0, None)
+        state = ReviewState("CLEAR", CLEAR_COLOR, 0.0, 0, 0.0, None)
 
         unchanged = _apply_demo_review_override(state, "Jordan Lee", {"alex chen"})
         overridden = _apply_demo_review_override(state, "Alex Chen", {"alex chen"})
@@ -69,6 +63,13 @@ class DetectionAssociationTest(unittest.TestCase):
         self.assertEqual(overridden.tier_label, "HIGH")
         self.assertEqual(overridden.color, HIGH_COLOR)
         self.assertEqual(overridden.recent_wave_count, 5)
+
+    def test_camera_credentials_are_removed_from_logged_source(self) -> None:
+        self.assertEqual(
+            _source_for_logging("rtsp://user:secret@example.test:8554/live?token=abc"),
+            "rtsp://example.test:8554/live",
+        )
+        self.assertEqual(_source_for_logging("C:\\videos\\clip.mp4"), "C:\\videos\\clip.mp4")
 
 
 class FakePoseAnalyzer:
@@ -82,6 +83,29 @@ class FakePoseAnalyzer:
         ]
 
     def draw_landmarks(self, frame, landmarks, color):
+        return None
+
+
+class UntrackedPoseAnalyzer(FakePoseAnalyzer):
+    def analyze(self, frame):
+        return [PoseResult(track_id=None, box=(10, 10, 80, 90), landmarks={})]
+
+
+class RecordingEventRecorder:
+    def __init__(self) -> None:
+        self.recorded = []
+        self.recent_messages = ()
+
+    def record(self, snapshot, timestamp, frame_number):
+        self.recorded.append(snapshot)
+
+    def end_track(self, track_key, timestamp, frame_number):
+        return None
+
+    def reset_tracks(self, **context):
+        return None
+
+    def close(self):
         return None
 
 
@@ -113,6 +137,33 @@ class MonitoringProcessorIntegrationTest(unittest.TestCase):
         self.assertEqual(len(processor.last_snapshots), 1)
         self.assertEqual(processor.last_snapshots[0].track_id, 7)
         self.assertEqual(processor.last_snapshots[0].identity_name, "Person")
+
+    def test_placeholder_tracks_are_not_written_to_event_reports(self) -> None:
+        config = replace(
+            DEFAULT_CONFIG,
+            allow_model_downloads=False,
+            event_logging_enabled=False,
+            expression_interval_frames=1,
+        )
+        recorder = RecordingEventRecorder()
+        processor = MonitoringProcessor(
+            config,
+            pose_analyzer=UntrackedPoseAnalyzer(),
+            emotion_analyzer=None,
+            identity_matcher=None,
+            known_identities=[],
+            event_recorder=recorder,
+        )
+        try:
+            processor.process_frame(
+                np.zeros((100, 100, 3), dtype=np.uint8),
+                timestamp=0.0,
+            )
+        finally:
+            processor.close()
+
+        self.assertEqual(recorder.recorded, [])
+        self.assertEqual(len(processor.last_snapshots), 1)
 
 
 if __name__ == "__main__":

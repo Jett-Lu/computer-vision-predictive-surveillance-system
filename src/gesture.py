@@ -6,14 +6,9 @@ from dataclasses import dataclass, field
 from pose import MoveNetKeypoint
 
 
-GREEN = (0, 255, 0)
-
-
 @dataclass(frozen=True)
 class WaveAlertState:
     recent_wave_count: int
-    tier_label: str
-    color: tuple[int, int, int]
     wave_detected: bool
 
 
@@ -26,7 +21,6 @@ class RightHandWaveMonitor:
     event_cooldown_seconds: float = 0.8
     horizontal_movement_threshold: float = 0.045
     raised_hand_margin: float = 0.05
-    high_alert_wave_count: int = 7
     _events: deque[float] = field(default_factory=deque, init=False)
     _anchor_x: float | None = field(default=None, init=False)
     _last_direction: int | None = field(default=None, init=False)
@@ -98,28 +92,7 @@ class RightHandWaveMonitor:
             self._events.popleft()
 
     def _state(self, wave_detected: bool) -> WaveAlertState:
-        count = len(self._events)
-        if count <= 2:
-            tier = "CLEAR"
-        elif count <= 4:
-            tier = "MONITOR"
-        elif count <= 6:
-            tier = "REVIEW"
-        else:
-            tier = "HIGH"
-
-        counted_flags = max(0, count - 2)
-        red_progress = min(
-            counted_flags / max(1, self.high_alert_wave_count - 2),
-            1.0,
-        )
-        red = int(round(255 * red_progress))
-        green = int(round(255 * (1.0 - red_progress)))
-        color = (0, green, red) if counted_flags else GREEN
-
         return WaveAlertState(
-            recent_wave_count=count,
-            tier_label=tier,
-            color=color,
+            recent_wave_count=len(self._events),
             wave_detected=wave_detected,
         )

@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import math
 import os
 
 import cv2
 
 from config import AppConfig
+from logging_setup import get_logger
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +21,7 @@ IMAGE_EXTENSIONS = frozenset({".bmp", ".jpeg", ".jpg", ".png", ".webp"})
 VIDEO_EXTENSIONS = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4"})
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 DEFAULT_VIDEO_FPS = 24.0
+logger = get_logger("export")
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,8 @@ def discover_media_files(input_path: Path) -> list[Path]:
     if input_path.is_file():
         return [input_path] if input_path.suffix.lower() in SUPPORTED_EXTENSIONS else []
     if not input_path.exists():
+        if input_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            return []
         input_path.mkdir(parents=True, exist_ok=True)
     return sorted(
         path
@@ -82,6 +87,7 @@ def export_media(
                 else:
                     result = _export_video(media_path, output_path, processor)
             except Exception as exc:
+                logger.exception("Failed to process media file: %s", media_path)
                 print(f"Failed to process {media_path.name}: {exc}")
                 continue
             results.append(result)
@@ -128,7 +134,7 @@ def _export_video(input_path: Path, output_path: Path, processor: Any) -> Export
     failed = False
     try:
         fps = capture.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
+        if not math.isfinite(fps) or fps <= 0:
             fps = DEFAULT_VIDEO_FPS
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -166,7 +172,11 @@ def _export_video(input_path: Path, output_path: Path, processor: Any) -> Export
     if frames_processed == 0:
         temporary_path.unlink(missing_ok=True)
         raise RuntimeError("The video did not contain readable frames.")
-    os.replace(temporary_path, output_path)
+    try:
+        os.replace(temporary_path, output_path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return ExportResult(input_path, output_path, "video", frames_processed)
 
 

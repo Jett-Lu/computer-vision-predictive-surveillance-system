@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -220,7 +221,7 @@ class OpenCVFaceIdentifier:
         return [
             DetectedFace(
                 raw=raw_face,
-                box=face_box(raw_face),
+                box=face_box(raw_face, image_width=width, image_height=height),
                 confidence=float(raw_face[14]),
             )
             for raw_face in faces
@@ -249,7 +250,7 @@ class OpenCVFaceIdentifier:
         self,
         image: np.ndarray,
         face: DetectedFace,
-        known_identities: list[KnownIdentity],
+        known_identities: Sequence[KnownIdentity],
     ) -> IdentityMatch:
         feature = self.extract_feature(image, face)
         if feature is None:
@@ -289,12 +290,22 @@ class OpenCVFaceIdentifier:
         )
 
 
-def face_box(raw_face: np.ndarray) -> tuple[int, int, int, int]:
+def face_box(
+    raw_face: np.ndarray,
+    image_width: int | None = None,
+    image_height: int | None = None,
+) -> tuple[int, int, int, int]:
     x, y, width, height = raw_face[:4]
     x1 = max(0, int(round(float(x))))
     y1 = max(0, int(round(float(y))))
     x2 = max(x1, int(round(float(x + width))))
     y2 = max(y1, int(round(float(y + height))))
+    if image_width is not None:
+        x1 = min(x1, image_width)
+        x2 = min(x2, image_width)
+    if image_height is not None:
+        y1 = min(y1, image_height)
+        y2 = min(y2, image_height)
     return x1, y1, x2, y2
 
 
