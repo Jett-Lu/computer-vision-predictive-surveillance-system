@@ -11,6 +11,7 @@ import shutil
 import cv2
 
 from camera import open_capture, prompt_camera_source
+from config import AppConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -100,7 +101,7 @@ def display_state(state: MenuState, delete_session: DeleteSession) -> None:
     if state == MenuState.MENU:
         print("Integrated Live Demo")
         print("Type 'detect' to start live monitoring.")
-        print("Commands: detect | enroll | delete | help | q")
+        print("Commands: detect | enroll | delete | export | doctor | help | q")
     elif state == MenuState.HELP:
         print("----- List of Commands -----")
         print("[q] - Quit the program")
@@ -109,6 +110,8 @@ def display_state(state: MenuState, delete_session: DeleteSession) -> None:
         print("[enroll] - Enroll a person into the database")
         print("[delete] - Delete a currently enrolled person")
         print("[detect] - Start live monitoring")
+        print("[export] - Process supported files from the input folder")
+        print("[doctor] - Check dependencies and model readiness")
     elif state == MenuState.ENROLL_GET_NAME:
         print("----- Enter a name for the enrolled person -----")
         print("Enter 'exit' to abort enrolling")
@@ -156,10 +159,15 @@ def display_delete_page(delete_session: DeleteSession) -> None:
         print("----- [n/p] - next/prev -----")
 
 
-def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
+def capture_enrollment_images(
+    session: EnrollmentSession,
+    config: AppConfig | None = None,
+) -> MenuState:
     if session.folder is None:
         raise RuntimeError("Enrollment folder has not been selected.")
 
+    runtime_config = config or AppConfig.from_env()
+    quality_identifier = _create_enrollment_identifier(runtime_config)
     camera_source = prompt_camera_source()
     capture = open_capture(camera_source)
     if not capture.isOpened():
@@ -168,6 +176,8 @@ def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
         return MenuState.MENU
 
     count = session.saved_count
+    quality_message = "Use varied angles and neutral lighting"
+    quality_color = (0, 180, 0)
     try:
         while True:
             ok, frame = capture.read()
@@ -178,15 +188,23 @@ def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("s") and count < session.target_image_count:
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                image_path = session.folder / f"{session.label}_{count}_{timestamp}.jpg"
-                if cv2.imwrite(str(image_path), frame):
-                    count += 1
-                    if count >= session.target_image_count:
-                        session.saved_count = 0
-                        return MenuState.ENROLL_COMPLETE
+                accepted, quality_message = validate_enrollment_frame(
+                    quality_identifier,
+                    frame,
+                )
+                quality_color = (0, 180, 0) if accepted else (0, 0, 255)
+                if accepted:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    image_path = session.folder / f"{session.label}_{count}_{timestamp}.jpg"
+                    if cv2.imwrite(str(image_path), frame):
+                        count += 1
+                        if count >= session.target_image_count:
+                            session.saved_count = 0
+                            return MenuState.ENROLL_COMPLETE
+                    else:
+                        print("Failed to write image to disk.")
                 else:
-                    print("Failed to write image to disk.")
+                    print(quality_message)
 
             cv2.putText(
                 frame,
@@ -195,6 +213,15 @@ def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
                 cv2.FONT_HERSHEY_PLAIN,
                 1,
                 (0, 0, 0),
+                1,
+            )
+            cv2.putText(
+                frame,
+                quality_message,
+                (10, 48),
+                cv2.FONT_HERSHEY_PLAIN,
+                1,
+                quality_color,
                 1,
             )
             cv2.imshow("Enrollment Capture", frame)
@@ -206,6 +233,39 @@ def capture_enrollment_images(session: EnrollmentSession) -> MenuState:
         capture.release()
         cv2.destroyAllWindows()
         cv2.waitKey(1)
+
+
+def validate_enrollment_frame(identifier, frame) -> tuple[bool, str]:
+    """Require one clear, sufficiently large face before saving enrollment data."""
+    if identifier is None:
+        return True, "Saved without automatic face-quality checks"
+    faces = identifier.detect_faces(frame)
+    if not faces:
+        return False, "No face found; face the camera and try again"
+    if len(faces) > 1:
+        return False, "More than one face found; only one person may enroll at a time"
+    if not identifier.is_face_usable(faces[0]):
+        return False, "Face is too small or uncertain; move closer and improve lighting"
+    return True, "Face accepted; change angle slightly for the next photo"
+
+
+def _create_enrollment_identifier(config: AppConfig):
+    try:
+        from identity import OpenCVFaceIdentifier
+        from model_manager import ensure_models, identity_model_specs
+
+        ensure_models(identity_model_specs(config), config)
+        return OpenCVFaceIdentifier(
+            detector_model_path=config.face_detector_model_path,
+            recognizer_model_path=config.face_recognizer_model_path,
+            cosine_threshold=config.identity_cosine_threshold,
+            min_score_margin=config.identity_min_score_margin,
+            min_face_size=config.identity_min_face_size,
+            min_face_confidence=config.identity_min_face_confidence,
+        )
+    except Exception as exc:
+        print(f"Enrollment quality checks unavailable: {exc}")
+        return None
 
 
 def handle_enrollment_state(
@@ -305,6 +365,7 @@ def handle_delete_state(
 
 
 def main() -> None:
+    config = AppConfig.from_env()
     state = MenuState.MENU
     error = ""
     enrollment_session = EnrollmentSession()
@@ -312,13 +373,13 @@ def main() -> None:
 
     while True:
         if state == MenuState.ENROLL_CAPTURE:
-            state = capture_enrollment_images(enrollment_session)
+            state = capture_enrollment_images(enrollment_session, config)
             continue
 
         if state == MenuState.DETECT:
             from detection import run_detection
 
-            run_detection(source=prompt_camera_source())
+            run_detection(source=prompt_camera_source(), config=config)
             state = MenuState.MENU
             continue
 
@@ -348,6 +409,20 @@ def main() -> None:
             state = MenuState.DELETE_CHOOSE
         elif command == "detect":
             state = MenuState.DETECT
+        elif command == "doctor":
+            from diagnostics import print_diagnostics, run_diagnostics
+
+            clear_terminal()
+            print_diagnostics(run_diagnostics(config))
+            input("\nPress Enter to return to the menu...")
+            state = MenuState.MENU
+        elif command == "export":
+            from media_export import export_media
+
+            clear_terminal()
+            export_media(config.input_dir, config.output_dir, config=config)
+            input("\nPress Enter to return to the menu...")
+            state = MenuState.MENU
         else:
             error = "Invalid command. Go to 'help' to see the list of commands."
 

@@ -49,7 +49,7 @@ class ReviewLevelMonitorTest(unittest.TestCase):
         self.assertAlmostEqual(second.expression_multiplier, 1.30)
         self.assertEqual(second.tier_label, "CLEAR")
 
-    def test_modifier_strengthens_repeated_activity_but_not_expression_alone(self) -> None:
+    def test_expression_context_does_not_change_behavior_tier(self) -> None:
         monitor = ReviewLevelMonitor(concern_smoothing_alpha=1.0)
         monitor.observe_expression("Sadness", 0.80)
 
@@ -58,9 +58,9 @@ class ReviewLevelMonitorTest(unittest.TestCase):
 
         self.assertEqual(no_behavior.tier_label, "CLEAR")
         self.assertEqual(no_behavior.color, CLEAR_COLOR)
-        self.assertEqual(repeated_behavior.score, 2.8)
-        self.assertEqual(repeated_behavior.tier_label, "REVIEW")
-        self.assertEqual(repeated_behavior.color, REVIEW_COLOR)
+        self.assertEqual(repeated_behavior.score, 2.0)
+        self.assertEqual(repeated_behavior.tier_label, "MONITOR")
+        self.assertEqual(repeated_behavior.color, MONITOR_COLOR)
 
     def test_neutral_happy_and_surprise_do_not_increase_multiplier(self) -> None:
         for label in ("Neutral", "Happiness", "Surprise"):
@@ -82,6 +82,18 @@ class ReviewLevelMonitorTest(unittest.TestCase):
         self.assertEqual(state.expression_multiplier, 1.0)
         self.assertIsNone(state.concern_label)
         self.assertEqual(state.tier_label, "MONITOR")
+
+    def test_low_confidence_concern_label_does_not_change_modifier(self) -> None:
+        monitor = ReviewLevelMonitor(
+            concern_smoothing_alpha=1.0,
+            min_concern_confidence=0.65,
+        )
+        monitor.observe_expression("Anger", 0.40)
+
+        state = monitor.update(wave_state(4))
+
+        self.assertEqual(state.expression_multiplier, 1.0)
+        self.assertIsNone(state.concern_label)
 
 
 if __name__ == "__main__":

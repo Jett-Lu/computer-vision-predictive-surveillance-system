@@ -1,26 +1,20 @@
+"""OpenCV-based face detection, matching, and multi-frame identity consensus."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.request import urlretrieve
 
 import cv2
 import numpy as np
 
+from config import DEFAULT_CONFIG
+from logging_setup import get_logger
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DETECTOR_MODEL_PATH = PROJECT_ROOT / "data" / "face_detection_yunet_2023mar.onnx"
-DEFAULT_RECOGNIZER_MODEL_PATH = PROJECT_ROOT / "data" / "face_recognition_sface_2021dec.onnx"
-DEFAULT_DETECTOR_MODEL_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
-    "face_detection_yunet_2023mar.onnx"
-)
-DEFAULT_RECOGNIZER_MODEL_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/"
-    "face_recognition_sface_2021dec.onnx"
-)
+
+logger = get_logger("identity")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
-COSINE_MATCH_THRESHOLD = 0.363
 
 
 @dataclass(frozen=True)
@@ -42,21 +36,129 @@ class IdentityMatch:
     name: str
     score: float | None
     matched: bool
+    runner_up_score: float | None = None
+    margin: float | None = None
+
+
+@dataclass(frozen=True)
+class IdentityDecision:
+    name: str
+    score: float | None
+    confirmed: bool
+
+
+@dataclass
+class IdentityConsensus:
+    """Require repeated matches before displaying an enrolled identity."""
+
+    window_size: int = 5
+    required_matches: int = 3
+    ttl_frames: int = 90
+    _observations: deque[tuple[str | None, float | None]] = field(
+        default_factory=deque,
+        init=False,
+    )
+    _confirmed_name: str | None = field(default=None, init=False)
+    _confirmed_score: float | None = field(default=None, init=False)
+    _last_confirmed_frame: int | None = field(default=None, init=False)
+    _suspended: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        self.window_size = max(1, self.window_size)
+        self.required_matches = min(
+            self.window_size,
+            max(1, self.required_matches),
+        )
+        self.ttl_frames = max(1, self.ttl_frames)
+
+    def observe(
+        self,
+        match: IdentityMatch | None,
+        frame_number: int,
+    ) -> IdentityDecision:
+        accepted_name = match.name if match is not None and match.matched else None
+        accepted_score = match.score if accepted_name is not None else None
+        if (
+            accepted_name is not None
+            and self._confirmed_name is not None
+            and accepted_name != self._confirmed_name
+        ):
+            self._suspended = True
+        elif accepted_name == self._confirmed_name and accepted_name is not None:
+            self._suspended = False
+        self._observations.append((accepted_name, accepted_score))
+        while len(self._observations) > self.window_size:
+            self._observations.popleft()
+
+        counts = Counter(
+            name for name, _ in self._observations if name is not None
+        )
+        if counts:
+            candidate_name, candidate_count = counts.most_common(1)[0]
+            candidate_scores = [
+                score
+                for name, score in self._observations
+                if name == candidate_name and score is not None
+            ]
+            blocked_old_majority = (
+                self._suspended
+                and candidate_name == self._confirmed_name
+                and accepted_name != self._confirmed_name
+            )
+            if candidate_count >= self.required_matches and not blocked_old_majority:
+                self._confirmed_name = candidate_name
+                self._confirmed_score = (
+                    sum(candidate_scores) / len(candidate_scores)
+                    if candidate_scores
+                    else None
+                )
+                self._last_confirmed_frame = frame_number
+                self._suspended = False
+        return self.current(frame_number)
+
+    def current(self, frame_number: int) -> IdentityDecision:
+        if (
+            self._confirmed_name is not None
+            and self._last_confirmed_frame is not None
+            and frame_number - self._last_confirmed_frame > self.ttl_frames
+        ):
+            self.clear()
+
+        return IdentityDecision(
+            name=(self._confirmed_name if not self._suspended else None) or "Unknown",
+            score=self._confirmed_score if not self._suspended else None,
+            confirmed=self._confirmed_name is not None and not self._suspended,
+        )
+
+    def clear(self) -> None:
+        self._observations.clear()
+        self._confirmed_name = None
+        self._confirmed_score = None
+        self._last_confirmed_frame = None
+        self._suspended = False
 
 
 class OpenCVFaceIdentifier:
-    """Dlib-free face detection and identity matching using OpenCV DNN models."""
+    """Cross-platform face detection and matching using OpenCV DNN models."""
 
     def __init__(
         self,
-        detector_model_path: Path = DEFAULT_DETECTOR_MODEL_PATH,
-        recognizer_model_path: Path = DEFAULT_RECOGNIZER_MODEL_PATH,
-        cosine_threshold: float = COSINE_MATCH_THRESHOLD,
+        detector_model_path: Path = DEFAULT_CONFIG.face_detector_model_path,
+        recognizer_model_path: Path = DEFAULT_CONFIG.face_recognizer_model_path,
+        cosine_threshold: float = DEFAULT_CONFIG.identity_cosine_threshold,
+        min_score_margin: float = DEFAULT_CONFIG.identity_min_score_margin,
+        min_face_size: int = DEFAULT_CONFIG.identity_min_face_size,
+        min_face_confidence: float = DEFAULT_CONFIG.identity_min_face_confidence,
     ) -> None:
-        ensure_model(detector_model_path, DEFAULT_DETECTOR_MODEL_URL)
-        ensure_model(recognizer_model_path, DEFAULT_RECOGNIZER_MODEL_URL)
+        if not detector_model_path.exists():
+            raise FileNotFoundError(f"Face detector model not found: {detector_model_path}")
+        if not recognizer_model_path.exists():
+            raise FileNotFoundError(f"Face recognizer model not found: {recognizer_model_path}")
 
         self.cosine_threshold = cosine_threshold
+        self.min_score_margin = min_score_margin
+        self.min_face_size = min_face_size
+        self.min_face_confidence = min_face_confidence
         self.detector = cv2.FaceDetectorYN_create(
             str(detector_model_path),
             "",
@@ -79,17 +181,17 @@ class OpenCVFaceIdentifier:
 
                 image = cv2.imread(str(image_path))
                 if image is None:
-                    print(f"Warning: could not read {image_path}, skipping")
+                    logger.warning("Could not read enrollment image: %s", image_path)
                     continue
 
                 face = self.detect_largest_face(image)
-                if face is None:
-                    print(f"Warning: no face found in {image_path}, skipping")
+                if face is None or not self.is_face_usable(face):
+                    logger.warning("Enrollment face did not pass quality checks: %s", image_path)
                     continue
 
                 feature = self.extract_feature(image, face)
                 if feature is None:
-                    print(f"Warning: could not encode face in {image_path}, skipping")
+                    logger.warning("Could not encode enrollment face: %s", image_path)
                     continue
 
                 identities.append(
@@ -103,20 +205,33 @@ class OpenCVFaceIdentifier:
         return identities
 
     def detect_largest_face(self, image: np.ndarray) -> DetectedFace | None:
+        faces = self.detect_faces(image)
+        return max(faces, key=lambda face: _face_area(face.box)) if faces else None
+
+    def detect_faces(self, image: np.ndarray) -> list[DetectedFace]:
         if image.size == 0:
-            return None
+            return []
 
         height, width = image.shape[:2]
         self.detector.setInputSize((width, height))
         _, faces = self.detector.detect(image)
         if faces is None or len(faces) == 0:
-            return None
+            return []
+        return [
+            DetectedFace(
+                raw=raw_face,
+                box=face_box(raw_face),
+                confidence=float(raw_face[14]),
+            )
+            for raw_face in faces
+        ]
 
-        raw_face = max(faces, key=lambda face: face[2] * face[3])
-        return DetectedFace(
-            raw=raw_face,
-            box=face_box(raw_face),
-            confidence=float(raw_face[14]),
+    def is_face_usable(self, face: DetectedFace) -> bool:
+        x1, y1, x2, y2 = face.box
+        return (
+            face.confidence >= self.min_face_confidence
+            and x2 - x1 >= self.min_face_size
+            and y2 - y1 >= self.min_face_size
         )
 
     def extract_feature(
@@ -140,23 +255,37 @@ class OpenCVFaceIdentifier:
         if feature is None:
             return IdentityMatch(name="Unknown", score=None, matched=False)
 
-        best_name = "Unknown"
-        best_score = -1.0
+        scores_by_name: dict[str, float] = {}
         for identity in known_identities:
-            score = self.recognizer.match(
-                feature,
-                identity.feature,
-                cv2.FaceRecognizerSF_FR_COSINE,
+            score = float(
+                self.recognizer.match(
+                    feature,
+                    identity.feature,
+                    cv2.FaceRecognizerSF_FR_COSINE,
+                )
             )
-            if score > best_score:
-                best_score = float(score)
-                best_name = identity.name
+            scores_by_name[identity.name] = max(
+                score,
+                scores_by_name.get(identity.name, -1.0),
+            )
 
-        matched = best_score >= self.cosine_threshold
+        if not scores_by_name:
+            return IdentityMatch(name="Unknown", score=None, matched=False)
+
+        ranked = sorted(scores_by_name.items(), key=lambda item: item[1], reverse=True)
+        best_name, best_score = ranked[0]
+        runner_up_score = ranked[1][1] if len(ranked) > 1 else None
+        margin = best_score - runner_up_score if runner_up_score is not None else best_score
+        matched = (
+            best_score >= self.cosine_threshold
+            and margin >= self.min_score_margin
+        )
         return IdentityMatch(
             name=best_name if matched else "Unknown",
             score=best_score,
             matched=matched,
+            runner_up_score=runner_up_score,
+            margin=margin,
         )
 
 
@@ -178,17 +307,6 @@ def offset_box(
     return x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y
 
 
-def ensure_model(model_path: Path, model_url: str) -> None:
-    if model_path.exists():
-        return
-
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading OpenCV face model: {model_path.name}")
-    try:
-        urlretrieve(model_url, model_path)
-    except Exception as exc:
-        if model_path.exists():
-            model_path.unlink()
-        raise RuntimeError(
-            f"Could not download required OpenCV face model from {model_url}"
-        ) from exc
+def _face_area(box: tuple[int, int, int, int]) -> int:
+    x1, y1, x2, y2 = box
+    return max(0, x2 - x1) * max(0, y2 - y1)

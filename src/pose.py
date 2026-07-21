@@ -8,9 +8,12 @@ from typing import Any
 import cv2
 import numpy as np
 
+from config import DEFAULT_CONFIG, AppConfig
+from model_manager import ensure_model, pose_model_spec
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "data" / "yolov8n-pose.pt"
+DEFAULT_MODEL_PATH = DEFAULT_CONFIG.pose_model_path
 MIN_KEYPOINT_SCORE = 0.3
 DEFAULT_SKELETON_COLOR = (0, 255, 0)
 
@@ -67,16 +70,28 @@ class PoseResult:
 class PoseAnalyzer:
     """Ultralytics multi-person pose tracking and skeleton rendering."""
 
-    def __init__(self, model_path: Path = DEFAULT_MODEL_PATH) -> None:
+    def __init__(
+        self,
+        model_path: Path = DEFAULT_MODEL_PATH,
+        config: AppConfig = DEFAULT_CONFIG,
+    ) -> None:
         from ultralytics import YOLO
 
+        if model_path == config.pose_model_path:
+            ensure_model(pose_model_spec(config), config)
+        elif not model_path.exists():
+            raise FileNotFoundError(f"Pose model not found: {model_path}")
+
+        self.confidence = config.pose_confidence
+        self.iou = config.pose_iou
+        self.min_keypoint_confidence = config.min_keypoint_confidence
         self.model = YOLO(str(model_path))
 
     def analyze(self, frame: np.ndarray) -> list[PoseResult]:
         results = self.model.track(
             frame,
-            conf=0.30,
-            iou=0.45,
+            conf=self.confidence,
+            iou=self.iou,
             verbose=False,
             classes=[0],
             persist=True,
@@ -97,6 +112,7 @@ class PoseAnalyzer:
                 None if keypoints.conf is None else keypoints.conf[index],
                 frame_width=width,
                 frame_height=height,
+                min_score=self.min_keypoint_confidence,
             )
             tracked_poses.append(
                 PoseResult(
@@ -114,6 +130,7 @@ class PoseAnalyzer:
         confidence: Any,
         frame_width: int,
         frame_height: int,
+        min_score: float = MIN_KEYPOINT_SCORE,
     ) -> dict[int, tuple[float, float]]:
         points = _as_numpy(keypoints)
         scores = (
@@ -123,7 +140,7 @@ class PoseAnalyzer:
         )
         landmarks: dict[int, tuple[float, float]] = {}
         for index, ((x, y), score) in enumerate(zip(points, scores)):
-            if float(score) >= MIN_KEYPOINT_SCORE:
+            if float(score) >= min_score:
                 landmarks[index] = (
                     float(np.clip(x / frame_width, 0.0, 1.0)),
                     float(np.clip(y / frame_height, 0.0, 1.0)),
@@ -158,6 +175,11 @@ class PoseAnalyzer:
 
         for point in points.values():
             cv2.circle(frame, point, 4, color, -1)
+
+    def reset_tracking(self) -> None:
+        """Clear ByteTrack state between unrelated live or recorded sources."""
+        if hasattr(self.model, "predictor"):
+            self.model.predictor = None
 
     def person_box(
         self,

@@ -2,6 +2,9 @@
 __pycache__/
 .venv/
 .tmp/
+*.egg-info/
+build/
+dist/
 enrollments/
 data/face_detection_yunet_2023mar.onnx
 data/face_recognition_sface_2021dec.onnx
@@ -11,3 +14,5 @@ input/*
 !input/README.md
 output/*
 !output/.gitkeep
+validation/media/*
+validation/reports/*

@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import os
 
 import cv2
+
+from config import AppConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +57,7 @@ def annotated_output_path(input_path: Path, output_dir: Path) -> Path:
 def export_media(
     input_path: Path = DEFAULT_INPUT_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
+    config: AppConfig | None = None,
 ) -> list[ExportResult]:
     """Process supported media inputs and return the successfully generated files."""
     input_path = input_path.resolve()
@@ -66,48 +70,62 @@ def export_media(
         return []
 
     results: list[ExportResult] = []
-    for media_path in media_files:
-        output_path = annotated_output_path(media_path, output_dir)
-        print(f"\nProcessing {media_path.name}...")
-        try:
-            if media_path.suffix.lower() in IMAGE_EXTENSIONS:
-                result = _export_image(media_path, output_path)
-            else:
-                result = _export_video(media_path, output_path)
-        except Exception as exc:
-            print(f"Failed to process {media_path.name}: {exc}")
-            continue
-        results.append(result)
-        print(f"Created {result.output_path}")
+    processor = _create_processor(config)
+    try:
+        for media_path in media_files:
+            output_path = annotated_output_path(media_path, output_dir)
+            print(f"\nProcessing {media_path.name}...")
+            processor.reset_tracking(source=str(media_path))
+            try:
+                if media_path.suffix.lower() in IMAGE_EXTENSIONS:
+                    result = _export_image(media_path, output_path, processor)
+                else:
+                    result = _export_video(media_path, output_path, processor)
+            except Exception as exc:
+                print(f"Failed to process {media_path.name}: {exc}")
+                continue
+            results.append(result)
+            print(f"Created {result.output_path}")
+    finally:
+        processor.close()
 
     print(f"\nCompleted {len(results)} of {len(media_files)} media files.")
     return results
 
 
-def _export_image(input_path: Path, output_path: Path) -> ExportResult:
+def _export_image(input_path: Path, output_path: Path, processor: Any) -> ExportResult:
     image = cv2.imread(str(input_path))
     if image is None:
         raise RuntimeError("OpenCV could not read the image.")
 
-    processor = _create_processor()
-    try:
-        annotated = processor.process_frame(image, timestamp=0.0)
-    finally:
-        processor.close()
+    annotated = image
+    for frame_number in range(max(1, processor.config.identity_required_matches)):
+        annotated = processor.process_frame(
+            image,
+            timestamp=frame_number / 30.0,
+            force_identity=True,
+        )
 
-    if not cv2.imwrite(str(output_path), annotated):
-        raise RuntimeError("OpenCV could not write the annotated image.")
+    temporary_path = _partial_output_path(output_path)
+    try:
+        if not cv2.imwrite(str(temporary_path), annotated):
+            raise RuntimeError("OpenCV could not write the annotated image.")
+        os.replace(temporary_path, output_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
     return ExportResult(input_path, output_path, "image", frames_processed=1)
 
 
-def _export_video(input_path: Path, output_path: Path) -> ExportResult:
+def _export_video(input_path: Path, output_path: Path, processor: Any) -> ExportResult:
     capture = cv2.VideoCapture(str(input_path))
     if not capture.isOpened():
         raise RuntimeError("OpenCV could not open the video.")
 
     writer: Any = None
-    processor: Any = None
     frames_processed = 0
+    temporary_path = _partial_output_path(output_path)
+    failed = False
     try:
         fps = capture.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
@@ -118,7 +136,7 @@ def _export_video(input_path: Path, output_path: Path) -> ExportResult:
             raise RuntimeError("The video does not report a valid frame size.")
 
         writer = cv2.VideoWriter(
-            str(output_path),
+            str(temporary_path),
             cv2.VideoWriter_fourcc(*"mp4v"),
             fps,
             (width, height),
@@ -126,7 +144,6 @@ def _export_video(input_path: Path, output_path: Path) -> ExportResult:
         if not writer.isOpened():
             raise RuntimeError("OpenCV could not create the annotated MP4 output.")
 
-        processor = _create_processor()
         while True:
             ok, frame = capture.read()
             if not ok:
@@ -136,21 +153,29 @@ def _export_video(input_path: Path, output_path: Path) -> ExportResult:
             frames_processed += 1
             if frames_processed % 30 == 0:
                 print(f"Processed {frames_processed} frames...")
+    except Exception:
+        failed = True
+        raise
     finally:
         capture.release()
         if writer is not None:
             writer.release()
-        if processor is not None:
-            processor.close()
+        if failed:
+            temporary_path.unlink(missing_ok=True)
 
     if frames_processed == 0:
-        if output_path.exists():
-            output_path.unlink()
+        temporary_path.unlink(missing_ok=True)
         raise RuntimeError("The video did not contain readable frames.")
+    os.replace(temporary_path, output_path)
     return ExportResult(input_path, output_path, "video", frames_processed)
 
 
-def _create_processor() -> Any:
+def _partial_output_path(output_path: Path) -> Path:
+    """Keep the real media suffix while writing an atomic temporary output."""
+    return output_path.with_name(f"{output_path.stem}.partial{output_path.suffix}")
+
+
+def _create_processor(config: AppConfig | None = None) -> Any:
     from detection import MonitoringProcessor
 
-    return MonitoringProcessor()
+    return MonitoringProcessor(config)

@@ -1,0 +1,226 @@
+"""Manifest-driven end-to-end validation for recorded POC scenarios."""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from time import perf_counter
+from typing import Any
+import json
+
+import cv2
+
+from config import AppConfig
+from detection import MonitoringProcessor
+
+
+@dataclass(frozen=True)
+class ValidationMetrics:
+    frames_processed: int
+    max_people: int
+    average_people: float
+    processing_fps: float
+    observed_identities: tuple[str, ...]
+    tier_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    name: str
+    passed: bool
+    failures: tuple[str, ...]
+    metrics: ValidationMetrics | None
+
+
+def run_validation(
+    manifest_path: Path,
+    report_path: Path | None = None,
+    config: AppConfig | None = None,
+) -> list[ValidationResult]:
+    """Process every manifest case and optionally write a machine-readable report."""
+    manifest_path = manifest_path.resolve()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    cases = payload.get("cases", [])
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("Validation manifest must contain a non-empty 'cases' list.")
+
+    runtime_config = config or AppConfig.from_env()
+    processor = MonitoringProcessor(runtime_config)
+    results: list[ValidationResult] = []
+    try:
+        for case in cases:
+            results.append(
+                _run_case(
+                    case,
+                    manifest_path.parent,
+                    processor,
+                )
+            )
+    finally:
+        processor.close()
+
+    if report_path is not None:
+        report_path = report_path.resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "passed": all(result.passed for result in results),
+                    "results": [asdict(result) for result in results],
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    return results
+
+
+def evaluate_metrics(
+    case: dict[str, Any],
+    metrics: ValidationMetrics,
+) -> tuple[str, ...]:
+    """Return human-readable acceptance failures for one measured scenario."""
+    failures: list[str] = []
+    minimum_people = int(case.get("min_people", 0))
+    if metrics.max_people < minimum_people:
+        failures.append(
+            f"expected at least {minimum_people} people, observed {metrics.max_people}"
+        )
+
+    minimum_fps = float(case.get("min_processing_fps", 0.0))
+    if metrics.processing_fps < minimum_fps:
+        failures.append(
+            f"expected at least {minimum_fps:.1f} processing FPS, "
+            f"observed {metrics.processing_fps:.1f}"
+        )
+
+    observed = set(metrics.observed_identities)
+    expected_identities = set(case.get("expected_identities", []))
+    missing = sorted(expected_identities - observed)
+    if missing:
+        failures.append(f"expected identities not observed: {', '.join(missing)}")
+
+    forbidden_identities = set(case.get("forbidden_identities", []))
+    unexpected = sorted(forbidden_identities & observed)
+    if unexpected:
+        failures.append(f"forbidden identities observed: {', '.join(unexpected)}")
+
+    maximum_high_ratio = float(case.get("max_high_frame_ratio", 1.0))
+    high_frames = metrics.tier_counts.get("HIGH", 0)
+    high_ratio = high_frames / max(1, metrics.frames_processed)
+    if high_ratio > maximum_high_ratio:
+        failures.append(
+            f"HIGH tier ratio {high_ratio:.2%} exceeds allowed {maximum_high_ratio:.2%}"
+        )
+    return tuple(failures)
+
+
+def print_validation_summary(results: list[ValidationResult]) -> None:
+    for result in results:
+        status = "PASS" if result.passed else "FAIL"
+        print(f"[{status}] {result.name}")
+        if result.metrics is not None:
+            print(
+                f"  frames={result.metrics.frames_processed} "
+                f"people={result.metrics.max_people} "
+                f"fps={result.metrics.processing_fps:.1f} "
+                f"identities={list(result.metrics.observed_identities)}"
+            )
+        for failure in result.failures:
+            print(f"  - {failure}")
+
+
+def _run_case(
+    case: dict[str, Any],
+    manifest_dir: Path,
+    processor: MonitoringProcessor,
+) -> ValidationResult:
+    name = str(case.get("name") or "unnamed case")
+    raw_input = case.get("input")
+    if not raw_input:
+        return ValidationResult(name, False, ("case has no input path",), None)
+
+    input_path = Path(raw_input)
+    if not input_path.is_absolute():
+        input_path = (manifest_dir / input_path).resolve()
+    if not input_path.exists():
+        return ValidationResult(name, False, (f"input not found: {input_path}",), None)
+
+    processor.reset_tracking(validation_case=name, source=str(input_path))
+    max_frames = max(1, int(case.get("max_frames", 300)))
+    frames_processed = 0
+    people_total = 0
+    max_people = 0
+    identities: set[str] = set()
+    tiers: Counter[str] = Counter()
+    started = perf_counter()
+
+    image = cv2.imread(str(input_path))
+    if image is not None:
+        warmup_frames = max(1, processor.config.identity_required_matches)
+        for frame_number in range(warmup_frames):
+            processor.process_frame(
+                image,
+                timestamp=float(frame_number) / 30.0,
+                force_identity=True,
+            )
+            people_total, max_people = _collect_snapshots(
+                processor.last_snapshots,
+                identities,
+                tiers,
+                people_total,
+                max_people,
+            )
+        frames_processed = warmup_frames
+    else:
+        capture = cv2.VideoCapture(str(input_path))
+        if not capture.isOpened():
+            return ValidationResult(name, False, ("OpenCV could not open input",), None)
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        fps = fps if fps > 0 else 24.0
+        try:
+            while frames_processed < max_frames:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                processor.process_frame(frame, timestamp=frames_processed / fps)
+                frames_processed += 1
+                people_total, max_people = _collect_snapshots(
+                    processor.last_snapshots,
+                    identities,
+                    tiers,
+                    people_total,
+                    max_people,
+                )
+        finally:
+            capture.release()
+
+    elapsed = max(perf_counter() - started, 1e-6)
+    metrics = ValidationMetrics(
+        frames_processed=frames_processed,
+        max_people=max_people,
+        average_people=people_total / max(1, frames_processed),
+        processing_fps=frames_processed / elapsed,
+        observed_identities=tuple(sorted(identities)),
+        tier_counts=dict(tiers),
+    )
+    failures = evaluate_metrics(case, metrics)
+    return ValidationResult(name, not failures, failures, metrics)
+
+
+def _collect_snapshots(
+    snapshots: list[Any],
+    identities: set[str],
+    tiers: Counter[str],
+    people_total: int,
+    max_people: int,
+) -> tuple[int, int]:
+    people_total += len(snapshots)
+    max_people = max(max_people, len(snapshots))
+    for snapshot in snapshots:
+        if snapshot.identity_confirmed:
+            identities.add(snapshot.identity_name)
+        tiers[snapshot.tier_label] += 1
+    return people_total, max_people

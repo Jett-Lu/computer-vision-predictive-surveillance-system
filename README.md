@@ -11,9 +11,8 @@ Live webcam demo combining:
 - optional enrolled-person identification with OpenCV YuNet + SFace
 
 Each tracked person receives an independent skeleton, wave counter, expression
-modifier, review overlay, and optional identity label. The
-`data/yolov8n-pose.pt` model is downloaded automatically on first use if it is
-not already present.
+context, review overlay, and optional identity label. Model downloads are
+atomic and checksum-verified before use.
 
 ## Identity Matching
 <img width="1118" height="624" alt="image" src="https://github.com/user-attachments/assets/546550a0-efeb-4ee6-baf0-524638fbcb93" />
@@ -27,7 +26,9 @@ package. The default stack uses OpenCV's DNN APIs:
 This is easier to install on Windows and is also portable to Linux and macOS
 through `opencv-contrib-python`.
 These two OpenCV model files are downloaded automatically on first use if they
-are not already present.
+are not already present. Identity is confirmed only after multiple agreeing
+frames, poor-quality faces are rejected, and confirmed names expire unless
+they are revalidated.
 
 If no enrollments are available, the live monitoring demo continues
 anonymously.
@@ -45,10 +46,9 @@ Review color uses a fixed professional ladder:
 - `HIGH` - red
 
 High-confidence `Anger`, `Contempt`, `Disgust`, `Fear`, and `Sadness`
-estimates increase a visible, smoothed expression modifier from `x1.00`
-toward `x1.50`. The modifier strengthens repeated-wave activity only; an
-expression estimate without repeated activity does not raise the review level.
-It clears when the face is no longer visible.
+estimates appear as a separate, smoothed expression-context signal. Expression
+does not change the behavior-based review tier. It clears when the face is no
+longer visible.
 
 This is a demo review indicator, not a conclusion that a person is suspicious
 or dangerous. Facial-expression estimates are uncertain and can reflect many
@@ -56,12 +56,29 @@ ordinary situations.
 
 ## Run
 
+Python 3.11 or 3.12 is recommended. Create an environment and install the
+tested dependency set:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-tested.txt
+.\.venv\Scripts\python.exe src\main.py --doctor --prepare-models
+```
+
+On macOS or Linux, use `.venv/bin/python` instead of
+`.venv\Scripts\python.exe`.
+
 ```powershell
 python src/main.py
 ```
 
 Use `enroll` to add identity photos and `detect` to start live monitoring.
 Press `q` to close the camera window.
+
+The live HUD shows FPS, active people, identity availability, and recent
+operator events. Detailed logs are written to `output/logs`, and meaningful
+tier, identity, wave, and expression changes are written as JSONL files under
+`output/events`.
 
 To bypass the menu and launch a camera directly:
 
@@ -102,5 +119,34 @@ $env:DEMO_HIGH_REVIEW_NAMES = "Taylor Brooks"
 python src/main.py --process-media --input "input\demo.png"
 ```
 
-This override is only for staged demonstrations. Leave
+This override is only for staged demonstrations. A visible `DEMO OVERRIDE
+ACTIVE` watermark is drawn whenever it affects a person. Leave
 `DEMO_HIGH_REVIEW_NAMES` unset for normal runs.
+
+## Validate The POC
+
+Copy `validation/manifest.example.json` to `validation/manifest.json`, add
+consented recorded scenarios under `validation/media`, then run:
+
+```powershell
+.\.venv\Scripts\python.exe src\main.py --validate `
+  --manifest validation\manifest.json `
+  --report validation\reports\latest.json
+```
+
+The runner measures people detected, confirmed identities, tier counts, and
+processing FPS, and returns a failing exit code when a scenario misses its
+acceptance criteria. See `validation/README.md` for the recommended scenario
+set.
+
+## Runtime Configuration
+
+Common environment overrides include:
+
+- `MONITOR_ALLOW_MODEL_DOWNLOADS=false` for verified offline operation
+- `MONITOR_IDENTITY_THRESHOLD=0.363` for a calibrated SFace threshold
+- `MONITOR_EXPRESSION_CONFIDENCE=0.65` for expression context visibility
+- `MONITOR_EVENT_LOGGING=false` to disable JSONL event reports
+- `MONITOR_DEBUG_TIMING=true` to log stage timings
+
+Run `python src/main.py --doctor` at any time to check the local installation.

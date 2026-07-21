@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "integrated-monitoring-poc"
+version = "0.2.0"
+description = "Cross-platform multi-person computer-vision monitoring proof of concept"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "opencv-contrib-python>=4.13,<4.14",
+    "numpy>=2.2,<2.5",
+    "mediapipe>=0.10.35,<0.11",
+    "emotiefflib>=1.1.1,<1.2",
+    "ultralytics>=8.4,<8.5",
+    "lap>=0.5.13,<0.6",
+]
+
+[project.scripts]
+monitor-poc = "main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "camera",
+    "config",
+    "detection",
+    "diagnostics",
+    "emotion",
+    "enrollment",
+    "events",
+    "gesture",
+    "identity",
+    "logging_setup",
+    "main",
+    "media_export",
+    "model_manager",
+    "pose",
+    "review",
+    "validation",
+]

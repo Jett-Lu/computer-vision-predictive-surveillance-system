@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "single known person",
+      "input": "media/known-person.mp4",
+      "max_frames": 300,
+      "min_people": 1,
+      "expected_identities": ["Example Person"],
+      "min_processing_fps": 5.0,
+      "max_high_frame_ratio": 0.1
+    },
+    {
+      "name": "unknown person remains unknown",
+      "input": "media/unknown-person.mp4",
+      "max_frames": 300,
+      "min_people": 1,
+      "forbidden_identities": ["Example Person"],
+      "min_processing_fps": 5.0,
+      "max_high_frame_ratio": 0.1
+    }
+  ]
+}

@@ -37,11 +37,12 @@ class ReviewState:
 
 @dataclass
 class ReviewLevelMonitor:
-    """Apply a visible, bounded emotion modifier to repeated activity."""
+    """Keep uncertain expression context separate from behavior-based tiers."""
 
     wave_allowance: int = 2
     concern_smoothing_alpha: float = 0.35
     max_multiplier_increase: float = 0.50
+    min_concern_confidence: float = 0.65
     _concern_strength: float = field(default=0.0, init=False)
     _concern_label: str | None = field(default=None, init=False)
 
@@ -59,7 +60,12 @@ class ReviewLevelMonitor:
             self._concern_label = None
             return False
 
-        target_strength = float(confidence) if label in CONCERN_EXPRESSIONS else 0.0
+        target_strength = (
+            float(confidence)
+            if label in CONCERN_EXPRESSIONS
+            and float(confidence) >= self.min_concern_confidence
+            else 0.0
+        )
         self._concern_strength = (
             self.concern_smoothing_alpha * target_strength
             + (1.0 - self.concern_smoothing_alpha) * self._concern_strength
@@ -79,7 +85,7 @@ class ReviewLevelMonitor:
     ) -> ReviewState:
         behavior_score = max(0, wave_state.recent_wave_count - self.wave_allowance)
         multiplier = 1.0 + self.max_multiplier_increase * self._concern_strength
-        score = behavior_score * multiplier
+        score = float(behavior_score)
 
         if score == 0:
             tier = "CLEAR"

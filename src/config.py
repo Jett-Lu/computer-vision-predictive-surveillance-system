@@ -1,0 +1,143 @@
+"""Central runtime configuration for the monitoring POC."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import os
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return max(minimum, int(value))
+    except ValueError:
+        return default
+
+
+def _env_float(
+    name: str,
+    default: float,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = max(minimum, float(value))
+    except ValueError:
+        return default
+    return min(parsed, maximum) if maximum is not None else parsed
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Values that affect model loading, scoring, tracking, and reporting."""
+
+    project_root: Path = PROJECT_ROOT
+    data_dir: Path = PROJECT_ROOT / "data"
+    enrollments_dir: Path = PROJECT_ROOT / "enrollments"
+    input_dir: Path = PROJECT_ROOT / "input"
+    output_dir: Path = PROJECT_ROOT / "output"
+    log_dir: Path = PROJECT_ROOT / "output" / "logs"
+    event_dir: Path = PROJECT_ROOT / "output" / "events"
+
+    allow_model_downloads: bool = True
+    model_download_timeout_seconds: float = 60.0
+    model_download_attempts: int = 3
+
+    expression_interval_frames: int = 5
+    identity_interval_frames: int = 8
+    stale_track_frames: int = 90
+    identity_consensus_window: int = 5
+    identity_required_matches: int = 3
+    identity_ttl_frames: int = 90
+    identity_min_face_size: int = 64
+    identity_min_face_confidence: float = 0.85
+    identity_cosine_threshold: float = 0.363
+    identity_min_score_margin: float = 0.03
+    min_concern_expression_confidence: float = 0.65
+    min_expression_display_confidence: float = 0.45
+
+    pose_confidence: float = 0.30
+    pose_iou: float = 0.45
+    min_keypoint_confidence: float = 0.30
+
+    debug_timing: bool = False
+    event_logging_enabled: bool = True
+    log_level: str = "INFO"
+    demo_high_review_names: str = ""
+
+    @property
+    def face_detector_model_path(self) -> Path:
+        return self.data_dir / "face_detection_yunet_2023mar.onnx"
+
+    @property
+    def face_recognizer_model_path(self) -> Path:
+        return self.data_dir / "face_recognition_sface_2021dec.onnx"
+
+    @property
+    def pose_model_path(self) -> Path:
+        return self.data_dir / "yolov8n-pose.pt"
+
+    @property
+    def emotion_face_model_path(self) -> Path:
+        return self.data_dir / "blaze_face_short_range.tflite"
+
+    @classmethod
+    def from_env(cls) -> "AppConfig":
+        """Create configuration with safe environment-variable overrides."""
+        return cls(
+            allow_model_downloads=_env_bool("MONITOR_ALLOW_MODEL_DOWNLOADS", True),
+            model_download_timeout_seconds=_env_float(
+                "MONITOR_MODEL_DOWNLOAD_TIMEOUT", 60.0, minimum=5.0
+            ),
+            model_download_attempts=_env_int("MONITOR_MODEL_DOWNLOAD_ATTEMPTS", 3),
+            expression_interval_frames=_env_int("MONITOR_EXPRESSION_INTERVAL", 5),
+            identity_interval_frames=_env_int("MONITOR_IDENTITY_INTERVAL", 8),
+            stale_track_frames=_env_int("MONITOR_STALE_TRACK_FRAMES", 90),
+            identity_consensus_window=_env_int("MONITOR_IDENTITY_WINDOW", 5),
+            identity_required_matches=_env_int("MONITOR_IDENTITY_MATCHES", 3),
+            identity_ttl_frames=_env_int("MONITOR_IDENTITY_TTL_FRAMES", 90),
+            identity_min_face_size=_env_int("MONITOR_MIN_FACE_SIZE", 64),
+            identity_min_face_confidence=_env_float(
+                "MONITOR_MIN_FACE_CONFIDENCE", 0.85, maximum=1.0
+            ),
+            identity_cosine_threshold=_env_float(
+                "MONITOR_IDENTITY_THRESHOLD", 0.363, maximum=1.0
+            ),
+            identity_min_score_margin=_env_float(
+                "MONITOR_IDENTITY_MARGIN", 0.03, maximum=1.0
+            ),
+            min_concern_expression_confidence=_env_float(
+                "MONITOR_EXPRESSION_CONFIDENCE", 0.65, maximum=1.0
+            ),
+            min_expression_display_confidence=_env_float(
+                "MONITOR_EXPRESSION_DISPLAY_CONFIDENCE", 0.45, maximum=1.0
+            ),
+            pose_confidence=_env_float("MONITOR_POSE_CONFIDENCE", 0.30, maximum=1.0),
+            pose_iou=_env_float("MONITOR_POSE_IOU", 0.45, maximum=1.0),
+            min_keypoint_confidence=_env_float(
+                "MONITOR_KEYPOINT_CONFIDENCE", 0.30, maximum=1.0
+            ),
+            debug_timing=_env_bool("MONITOR_DEBUG_TIMING", False),
+            event_logging_enabled=_env_bool("MONITOR_EVENT_LOGGING", True),
+            log_level=os.environ.get("MONITOR_LOG_LEVEL", "INFO").upper(),
+            demo_high_review_names=os.environ.get("DEMO_HIGH_REVIEW_NAMES", ""),
+        )
+
+
+DEFAULT_CONFIG = AppConfig.from_env()

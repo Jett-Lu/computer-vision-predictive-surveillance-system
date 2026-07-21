@@ -28,10 +28,19 @@ class FaceEmotionResult:
     confidence: float
 
 
+def display_emotion_label(label: str, confidence: float, threshold: float) -> str:
+    """Return a cautious display label for a probabilistic expression estimate."""
+    return label if confidence >= threshold else "Uncertain"
+
+
 class FaceEmotionAnalyzer:
     """Detect a face within the pose box and classify its visible expression."""
 
-    def __init__(self, model_path: Path = DEFAULT_FACE_MODEL_PATH) -> None:
+    def __init__(
+        self,
+        model_path: Path = DEFAULT_FACE_MODEL_PATH,
+        min_display_confidence: float = 0.45,
+    ) -> None:
         if not model_path.exists():
             raise FileNotFoundError(f"Face detector model not found: {model_path}")
 
@@ -41,6 +50,7 @@ class FaceEmotionAnalyzer:
             min_detection_confidence=0.5,
         )
         self.detector = vision.FaceDetector.create_from_options(detector_options)
+        self.min_display_confidence = min_display_confidence
         self.recognizer = EmotiEffLibRecognizer(
             engine="onnx",
             model_name="enet_b2_8",
@@ -89,6 +99,11 @@ class FaceEmotionAnalyzer:
         emotion_index = int(scores[0].argmax())
         label = self.recognizer.idx_to_emotion_class[emotion_index]
         confidence = float(scores[0][emotion_index])
+        label = display_emotion_label(
+            label,
+            confidence,
+            self.min_display_confidence,
+        )
         keypoints = tuple(
             (int(keypoint.x * crop_width) + x1, int(keypoint.y * crop_height) + y1)
             for keypoint in face.keypoints
