@@ -112,7 +112,7 @@ On Windows, you can also double-click `Run Media Export.cmd`.
 You can also process one specific file:
 
 ```powershell
-python src/main.py --process-media --input "C:\path\to\photo.jpg"
+python src/main.py --process-media --input "input\photo.jpg"
 ```
 
 ## Demo-Only High Review Override
@@ -158,3 +158,114 @@ Common environment overrides include:
 - `MONITOR_DEBUG_TIMING=true` to log stage timings
 
 Run `python src/main.py --doctor` at any time to check the local installation.
+
+## Human Activity Recognition Benchmark
+
+The repository includes an optional offline benchmark for four human activities:
+`walking`, `running`, `standing`, and `sitting`. It is isolated from the live
+monitoring application. Existing live detection, identity, expression, gesture,
+review, export, logging, and validation behavior is unchanged.
+
+Three compact approaches use the same source-video partitions:
+
+- **MLP:** a small network trained on 16 frames of bounding-box-normalized YOLO
+  Pose coordinates and visibility values.
+- **CNN:** a four-class linear head trained on cached features from a frozen
+  ImageNet-pretrained MobileNetV2.
+- **Advanced video model:** a four-class linear head trained on cached features
+  from a frozen Kinetics-400-pretrained S3D model.
+
+The frozen feature caches make repeated head training fast and avoid rerunning
+YOLO or the pretrained backbones every epoch. TensorFlow is not used by this
+benchmark.
+
+### Dataset
+
+The benchmark expects the official
+[HMDB51](https://serre-lab.clps.brown.edu/wp-content/uploads/2013/10/hmdb51_org.rar)
+videos and
+[official split files](https://serre-lab.clps.brown.edu/wp-content/uploads/2013/10/test_train_splits.rar),
+restricted to the `walk`, `run`, `stand`, and `sit` classes. Fold 1 is the
+default. Official test clips remain untouched; the official training clips are
+divided deterministically into training and validation sets at the video level.
+Derived frames from one source video never cross partitions.
+
+HMDB51 contains clips collected from varied movie and internet-video sources.
+Its distribution does not present a simple permissive software-style license.
+Review the source terms before commercial use, do not redistribute the videos,
+and keep the dataset outside version control.
+
+### Model And Dataset Sources
+
+- Pose extraction uses
+  [Ultralytics YOLOv8 Pose](https://docs.ultralytics.com/models/yolov8/).
+  Ultralytics documents AGPL-3.0 and enterprise licensing options for its code
+  and pretrained models; verify that the selected option fits the deployment.
+- The image backbone uses Torchvision
+  [MobileNetV2](https://docs.pytorch.org/vision/stable/models/mobilenetv2.html)
+  with `MobileNet_V2_Weights.DEFAULT`.
+- The video backbone uses Torchvision
+  [S3D](https://docs.pytorch.org/vision/main/models/generated/torchvision.models.video.s3d.html)
+  with `S3D_Weights.KINETICS400_V1`. Torchvision marks its video-model API as
+  beta.
+- Torchvision source code uses the
+  [BSD 3-Clause license](https://github.com/pytorch/vision/blob/main/LICENSE).
+  Its maintainers note that pretrained weights can also carry terms inherited
+  from their training data. Review model and dataset terms for the intended
+  use.
+
+Extract the video archive and split archive, then prepare the one-time cache:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
+.\.venv\Scripts\python.exe scripts\prepare_activity_data.py `
+  --dataset-root "data\hmdb51\hmdb51_org" `
+  --annotations-root "data\hmdb51\splits"
+```
+
+When the original archive endpoint is unavailable, the fold-1 CSV metadata and
+individual clips from the
+[HMDB51 Hugging Face mirror](https://huggingface.co/datasets/Sina272/hmdb51-v2)
+can be used to download only the four target classes:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_activity_data.py `
+  --dataset-root "data\hmdb51\subset" `
+  --metadata-train "data\hmdb51\metadata_train.csv" `
+  --metadata-test "data\hmdb51\metadata_test.csv" `
+  --download-videos
+```
+
+Train all three heads and immediately evaluate the official test split:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_activity_models.py
+```
+
+Evaluate existing checkpoints without retraining:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_activity_models.py
+```
+
+Measured outputs are written to `output/activity_results`:
+
+- `metrics.json`
+- `model_comparison.csv`
+- `predictions.csv`
+- `mlp_confusion_matrix.png`
+- `cnn_confusion_matrix.png`
+- `advanced_confusion_matrix.png`
+- `training_curves.png`
+- `run_manifest.json`
+
+Accuracy, macro precision, macro recall, macro F1, confusion matrices, head
+training time, and measured inference latency are calculated from real
+predictions. Dataset files, caches, checkpoints, and generated reports are
+ignored by Git.
+
+The measured experiment and its interpretation are recorded in
+[`docs/activity_recognition_results.md`](docs/activity_recognition_results.md).
+
+The benchmark operates offline and is not integrated into the live monitoring
+application.

@@ -37,3 +37,7 @@ py-modules = [
     "review",
     "validation",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["activity_recognition*"]

@@ -69,7 +69,7 @@ class DetectionAssociationTest(unittest.TestCase):
             _source_for_logging("rtsp://user:secret@example.test:8554/live?token=abc"),
             "rtsp://example.test:8554/live",
         )
-        self.assertEqual(_source_for_logging("C:\\videos\\clip.mp4"), "C:\\videos\\clip.mp4")
+        self.assertEqual(_source_for_logging("input\\clip.mp4"), "input\\clip.mp4")
 
 
 class FakePoseAnalyzer:

@@ -2,6 +2,7 @@
 __pycache__/
 .venv/
 .tmp/
+.pytest_cache/
 *.egg-info/
 build/
 dist/
@@ -10,6 +11,11 @@ data/face_detection_yunet_2023mar.onnx
 data/face_recognition_sface_2021dec.onnx
 data/yolov8n-pose.pt
 data/enet_b2_8.onnx
+data/yolov8n.pt
+data/movenet_singlepose_lightning.tflite
+data/activity_cache/
+data/activity_models/
+data/hmdb51/
 input/*
 !input/.gitkeep
 !input/README.md
