@@ -28,6 +28,8 @@ class TrackSnapshot:
     expression_label: str | None
     expression_context_strength: float
     demo_override: bool = False
+    activity_label: str | None = None
+    activity_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class MonitorEvent:
     track_id: int | None
     identity_name: str
     details: dict[str, Any]
+    activity_label: str | None = None
+    activity_confidence: float | None = None
 
 
 class EventRecorder:
@@ -83,6 +87,13 @@ class EventRecorder:
                     frame_number,
                     {},
                     f"Track {snapshot.track_key}: DEMO override",
+                )
+            if snapshot.activity_label is not None:
+                self._emit_activity_change(
+                    snapshot,
+                    None,
+                    timestamp_seconds,
+                    frame_number,
                 )
         else:
             if snapshot.tier_label != previous.tier_label:
@@ -143,6 +154,16 @@ class EventRecorder:
                     {},
                     f"Track {snapshot.track_key}: DEMO override",
                 )
+            if (
+                snapshot.activity_label is not None
+                and snapshot.activity_label != previous.activity_label
+            ):
+                self._emit_activity_change(
+                    snapshot,
+                    previous.activity_label,
+                    timestamp_seconds,
+                    frame_number,
+                )
         self._previous[snapshot.track_key] = snapshot
 
     def end_track(
@@ -191,14 +212,39 @@ class EventRecorder:
             track_id=snapshot.track_id,
             identity_name=snapshot.identity_name,
             details=details,
+            activity_label=snapshot.activity_label,
+            activity_confidence=snapshot.activity_confidence,
         )
         self._recent_messages.append(message)
         if self._stream is not None:
             payload = asdict(event)
+            if event.activity_label is None:
+                payload.pop("activity_label")
+                payload.pop("activity_confidence")
             payload["recorded_at"] = datetime.now(timezone.utc).isoformat()
             payload["context"] = self._context
             self._stream.write(json.dumps(payload, sort_keys=True) + "\n")
             self._stream.flush()
+
+    def _emit_activity_change(
+        self,
+        snapshot: TrackSnapshot,
+        previous_label: str | None,
+        timestamp_seconds: float,
+        frame_number: int,
+    ) -> None:
+        self._emit(
+            "activity_changed",
+            snapshot,
+            timestamp_seconds,
+            frame_number,
+            {
+                "from": previous_label,
+                "to": snapshot.activity_label,
+                "confidence": snapshot.activity_confidence,
+            },
+            f"Track {snapshot.track_key}: activity {snapshot.activity_label}",
+        )
 
 
 def session_event_path(event_dir: Path, prefix: str = "live") -> Path:

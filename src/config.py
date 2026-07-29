@@ -52,6 +52,19 @@ def _env_float(
     return min(parsed, maximum) if maximum is not None else parsed
 
 
+def _env_choice(name: str, default: str, choices: set[str]) -> str:
+    value = os.environ.get(name, default).strip().casefold()
+    return value if value in choices else default
+
+
+def _env_path(name: str, default: Path) -> Path:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Values that affect model loading, scoring, tracking, and reporting."""
@@ -85,6 +98,15 @@ class AppConfig:
     pose_confidence: float = 0.30
     pose_iou: float = 0.45
     min_keypoint_confidence: float = 0.30
+
+    activity_model: str = "none"
+    activity_checkpoint_path: Path = (
+        PROJECT_ROOT / "data" / "activity_models" / "mlp.pt"
+    )
+    activity_sequence_length: int = 16
+    activity_confidence_threshold: float = 0.50
+    activity_inference_interval: int = 5
+    activity_smoothing_window: int = 5
 
     debug_timing: bool = False
     event_logging_enabled: bool = True
@@ -149,6 +171,32 @@ class AppConfig:
             pose_iou=_env_float("MONITOR_POSE_IOU", 0.45, maximum=1.0),
             min_keypoint_confidence=_env_float(
                 "MONITOR_KEYPOINT_CONFIDENCE", 0.30, maximum=1.0
+            ),
+            activity_model=_env_choice(
+                "MONITOR_ACTIVITY_MODEL",
+                "none",
+                {"none", "mlp"},
+            ),
+            activity_checkpoint_path=_env_path(
+                "MONITOR_ACTIVITY_CHECKPOINT",
+                PROJECT_ROOT / "data" / "activity_models" / "mlp.pt",
+            ),
+            activity_sequence_length=_env_int(
+                "MONITOR_ACTIVITY_SEQUENCE_LENGTH",
+                16,
+            ),
+            activity_confidence_threshold=_env_float(
+                "MONITOR_ACTIVITY_CONFIDENCE",
+                0.50,
+                maximum=1.0,
+            ),
+            activity_inference_interval=_env_int(
+                "MONITOR_ACTIVITY_INTERVAL",
+                5,
+            ),
+            activity_smoothing_window=_env_int(
+                "MONITOR_ACTIVITY_SMOOTHING_WINDOW",
+                5,
             ),
             debug_timing=_env_bool("MONITOR_DEBUG_TIMING", False),
             event_logging_enabled=_env_bool("MONITOR_EVENT_LOGGING", True),

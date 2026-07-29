@@ -9,10 +9,13 @@ Live webcam demo combining:
 - EmotiEffLib facial-expression estimates
 - YOLO person tracking
 - optional enrolled-person identification with OpenCV YuNet + SFace
+- optional per-person MLP activity labels from existing YOLO Pose keypoints
 
 Each tracked person receives an independent skeleton, wave counter, expression
-context, review overlay, and optional identity label. Model downloads are
-atomic and checksum-verified before use.
+context, review overlay, and optional identity and activity labels. Activity
+recognition is disabled by default and remains informational: its output is not
+an input to review-tier scoring. Model downloads are atomic and
+checksum-verified before use.
 
 ## Identity Matching
 <img width="1118" height="624" alt="image" src="https://github.com/user-attachments/assets/546550a0-efeb-4ee6-baf0-524638fbcb93" />
@@ -95,6 +98,35 @@ python src/main.py --detect --source 1
 Camera source `0` is usually the built-in webcam. Source `1` is often an
 external USB camera.
 
+### Optional Live Activity Labels
+
+Live MLP activity recognition supports `walking`, `running`, `standing`, and
+`sitting`. It reuses the YOLO Pose results already produced for each ByteTrack
+ID; it does not run a second pose model. Install the optional dependencies and
+provide a compatible checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
+.\.venv\Scripts\python.exe src\main.py --detect --source 0 `
+  --activity-model mlp `
+  --activity-checkpoint "data\activity_models\mlp.pt"
+```
+
+The default checkpoint path is `data/activity_models/mlp.pt`, which is created
+by `scripts/train_activity_models.py` and intentionally excluded from version
+control. The checkpoint must contain the canonical label order and the same
+16-frame sequence length used by the live configuration.
+
+The live runtime waits for 16 valid tracked poses, performs MLP inference every
+five frames by default, and averages the five most recent probability vectors.
+Predictions below the default `0.50` confidence threshold are displayed as
+`Unknown`. Missing poses do not invoke the classifier, and an all-zero history
+is handled as `Unknown`. History and smoothing state are independent per track
+and are removed when a track expires or tracking resets.
+
+Activity labels and confidence appear in the per-person overlay and optional
+event report. They do not increase or decrease review tiers.
+
 ## Export An Annotated Photo Or Video
 
 Place a photo or recorded video in the `input` folder, then run:
@@ -154,6 +186,12 @@ Common environment overrides include:
 - `MONITOR_EXPRESSION_CONFIDENCE=0.65` for expression context visibility
 - `MONITOR_EXPRESSION_DISPLAY_CONFIDENCE=0.45` for tentative `?` labels
 - `MONITOR_EXPRESSION_SMOOTHING_SECONDS=0.8` for display stability
+- `MONITOR_ACTIVITY_MODEL=none` or `mlp`
+- `MONITOR_ACTIVITY_CHECKPOINT=data/activity_models/mlp.pt`
+- `MONITOR_ACTIVITY_SEQUENCE_LENGTH=16`
+- `MONITOR_ACTIVITY_CONFIDENCE=0.50`
+- `MONITOR_ACTIVITY_INTERVAL=5`
+- `MONITOR_ACTIVITY_SMOOTHING_WINDOW=5`
 - `MONITOR_EVENT_LOGGING=false` to disable JSONL event reports
 - `MONITOR_DEBUG_TIMING=true` to log stage timings
 
@@ -161,10 +199,11 @@ Run `python src/main.py --doctor` at any time to check the local installation.
 
 ## Human Activity Recognition Benchmark
 
-The repository includes an optional offline benchmark for four human activities:
-`walking`, `running`, `standing`, and `sitting`. It is isolated from the live
-monitoring application. Existing live detection, identity, expression, gesture,
-review, export, logging, and validation behavior is unchanged.
+The repository includes an optional benchmark for four human activities:
+`walking`, `running`, `standing`, and `sitting`. The MLP checkpoint can be
+enabled in the live monitoring pipeline as described above. MobileNetV2 and
+S3D remain offline comparison models. Existing behavior is unchanged when the
+activity model is `none`.
 
 Three compact approaches use the same source-video partitions:
 
@@ -267,5 +306,5 @@ ignored by Git.
 The measured experiment and its interpretation are recorded in
 [`docs/activity_recognition_results.md`](docs/activity_recognition_results.md).
 
-The benchmark operates offline and is not integrated into the live monitoring
-application.
+Benchmark training and evaluation remain offline. Only the saved MLP head is
+available for optional live inference.

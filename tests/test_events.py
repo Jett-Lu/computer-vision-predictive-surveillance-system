@@ -43,6 +43,8 @@ class EventRecorderTest(unittest.TestCase):
             [event["event_type"] for event in events],
             ["track_started", "tier_changed", "wave_counted"],
         )
+        self.assertNotIn("activity_label", events[0])
+        self.assertNotIn("activity_confidence", events[0])
 
     def test_expression_event_reports_context_strength(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -64,6 +66,51 @@ class EventRecorderTest(unittest.TestCase):
 
         self.assertEqual(event["event_type"], "expression_changed")
         self.assertEqual(event["details"], {"label": "Anger", "strength": 0.3})
+
+    def test_activity_events_are_emitted_only_when_the_label_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.jsonl"
+            recorder = EventRecorder(path)
+            recorder.record(snapshot(), 0.0, 0)
+            recorder.record(
+                replace(
+                    snapshot(),
+                    activity_label="walking",
+                    activity_confidence=0.82,
+                ),
+                1.0,
+                1,
+            )
+            recorder.record(
+                replace(
+                    snapshot(),
+                    activity_label="walking",
+                    activity_confidence=0.91,
+                ),
+                2.0,
+                2,
+            )
+            recorder.record(
+                replace(
+                    snapshot(),
+                    activity_label="running",
+                    activity_confidence=0.76,
+                ),
+                3.0,
+                3,
+            )
+            recorder.close()
+
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+
+        activity_events = [
+            event for event in events if event["event_type"] == "activity_changed"
+        ]
+        self.assertEqual(len(activity_events), 2)
+        self.assertEqual(activity_events[0]["details"]["from"], None)
+        self.assertEqual(activity_events[0]["details"]["to"], "walking")
+        self.assertEqual(activity_events[1]["details"]["from"], "walking")
+        self.assertEqual(activity_events[1]["details"]["to"], "running")
 
 
 if __name__ == "__main__":

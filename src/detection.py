@@ -33,6 +33,8 @@ os.environ.setdefault("YOLO_CONFIG_DIR", str(TMP_DIR / "ultralytics"))
 
 logger = get_logger("detection")
 _AUTO = object()
+GLOBAL_HUD_WIDTH = 520
+GLOBAL_HUD_MAX_HEIGHT = 60
 
 
 @dataclass
@@ -160,6 +162,7 @@ class MonitoringProcessor:
         pose_analyzer: Any = None,
         emotion_analyzer: Any = _AUTO,
         identity_matcher: Any = _AUTO,
+        activity_recognizer: Any = _AUTO,
         known_identities: Sequence[KnownIdentity] | None = None,
         event_recorder: EventRecorder | None = None,
     ) -> None:
@@ -189,6 +192,9 @@ class MonitoringProcessor:
                 model_path=self.config.pose_model_path,
                 config=self.config,
             )
+        )
+        self.activity_recognizer = self._prepare_activity_recognizer(
+            activity_recognizer
         )
         self.emotion_analyzer = self._prepare_emotion_analyzer(emotion_analyzer)
         if self.emotion_analyzer is not None:
@@ -232,6 +238,10 @@ class MonitoringProcessor:
     def identity_enabled(self) -> bool:
         return self.identity_matcher is not None and bool(self.known_identities)
 
+    @property
+    def activity_enabled(self) -> bool:
+        return self.activity_recognizer is not None
+
     def process_frame(
         self,
         frame: Any,
@@ -264,6 +274,20 @@ class MonitoringProcessor:
                 runtime = self._new_person_runtime()
                 self.person_states[track_key] = runtime
             runtime.last_seen_frame = self.frame_count
+
+            activity_prediction = None
+            if (
+                self.activity_recognizer is not None
+                and pose_result.track_id is not None
+            ):
+                with self.timer("activity"):
+                    activity_prediction = self.activity_recognizer.update(
+                        track_key,
+                        pose_result.landmarks,
+                        pose_result.box,
+                        frame.shape,
+                        self.frame_count,
+                    )
 
             wave_state = runtime.wave_monitor.update(
                 pose_result.landmarks,
@@ -330,6 +354,16 @@ class MonitoringProcessor:
                     review_state,
                     wave_state.wave_detected,
                     context_activated,
+                    (
+                        None
+                        if activity_prediction is None
+                        else activity_prediction.label
+                    ),
+                    (
+                        None
+                        if activity_prediction is None
+                        else activity_prediction.confidence
+                    ),
                 )
                 _draw_identity_overlay(
                     annotated,
@@ -349,6 +383,14 @@ class MonitoringProcessor:
                 expression_label=review_state.concern_label,
                 expression_context_strength=review_state.concern_strength,
                 demo_override=demo_override,
+                activity_label=(
+                    None if activity_prediction is None else activity_prediction.label
+                ),
+                activity_confidence=(
+                    None
+                    if activity_prediction is None
+                    else activity_prediction.confidence
+                ),
             )
             snapshots.append(snapshot)
             if pose_result.track_id is not None:
@@ -361,6 +403,8 @@ class MonitoringProcessor:
             active_keys,
         )
         for track_key in stale_keys:
+            if self.activity_recognizer is not None:
+                self.activity_recognizer.remove_track(track_key)
             self.event_recorder.end_track(track_key, timestamp, self.frame_count)
 
         self.last_snapshots = snapshots
@@ -378,6 +422,8 @@ class MonitoringProcessor:
 
     def reset_tracking(self, **event_context: Any) -> None:
         self.person_states.clear()
+        if self.activity_recognizer is not None:
+            self.activity_recognizer.reset()
         self.last_snapshots = []
         self.frame_count = 0
         self._timestamp_origin = None
@@ -392,6 +438,17 @@ class MonitoringProcessor:
 
     def close(self) -> None:
         try:
+            if self.activity_recognizer is not None:
+                average_latency = (
+                    self.activity_recognizer.average_inference_latency_ms
+                )
+                if average_latency is not None:
+                    logger.info(
+                        "Activity MLP incremental latency %.3f ms "
+                        "(%s inferences; excludes YOLO)",
+                        average_latency,
+                        self.activity_recognizer.inference_count,
+                    )
             if self.emotion_analyzer is not None:
                 self.emotion_analyzer.close()
         finally:
@@ -430,6 +487,37 @@ class MonitoringProcessor:
             logger.warning("Expression analysis disabled: %s", exc)
             logger.debug("Expression analyzer initialization failed", exc_info=True)
             return None
+
+    def _prepare_activity_recognizer(self, supplied_recognizer: Any) -> Any:
+        if supplied_recognizer is not _AUTO:
+            return supplied_recognizer
+        if self.config.activity_model == "none":
+            logger.info("Activity recognition OFF")
+            return None
+        if self.config.activity_model != "mlp":
+            raise ValueError(
+                f"Unsupported activity model: {self.config.activity_model}"
+            )
+
+        from activity_recognition.live import LiveMLPActivityRecognizer
+
+        logger.info(
+            "Loading live MLP activity checkpoint: %s",
+            self.config.activity_checkpoint_path,
+        )
+        recognizer = LiveMLPActivityRecognizer(
+            self.config.activity_checkpoint_path,
+            sequence_length=self.config.activity_sequence_length,
+            confidence_threshold=self.config.activity_confidence_threshold,
+            inference_interval=self.config.activity_inference_interval,
+            smoothing_window=self.config.activity_smoothing_window,
+        )
+        logger.info(
+            "Activity recognition ON (MLP, threshold %.0f%%, interval %s frames)",
+            self.config.activity_confidence_threshold * 100.0,
+            self.config.activity_inference_interval,
+        )
+        return recognizer
 
     def _new_person_runtime(self) -> PersonRuntime:
         return PersonRuntime(
@@ -624,18 +712,31 @@ def _draw_review_overlay(
     review_state: ReviewState,
     wave_detected: bool,
     context_activated: bool,
+    activity_label: str | None = None,
+    activity_confidence: float | None = None,
 ) -> None:
     px1, py1, px2, py2 = person_box
     cv2.rectangle(frame, (px1, py1), (px2, py2), review_state.color, 3)
-    status_lines = [
-        review_state.tier_label,
+    status_lines = [review_state.tier_label]
+    if activity_label is not None and activity_confidence is not None:
+        status_lines.insert(
+            0,
+            f"Activity: {activity_label.title()} {activity_confidence:.0%}",
+        )
+    status_lines.append(
         f"waves:{review_state.recent_wave_count} | context:{review_state.concern_strength:.0%}",
-    ]
+    )
     if review_state.concern_expression_active:
         status_lines.append(
             f"{review_state.concern_label} {review_state.concern_strength:.0%}"
         )
-    _draw_status_panel(frame, person_box, status_lines, review_state.color)
+    _draw_status_panel(
+        frame,
+        person_box,
+        status_lines,
+        review_state.color,
+        avoid_global_hud=activity_label is not None,
+    )
 
     if wave_detected:
         message = "Right-hand wave counted"
@@ -659,12 +760,31 @@ def _draw_status_panel(
     person_box: tuple[int, int, int, int],
     lines: list[str],
     color: tuple[int, int, int],
+    *,
+    avoid_global_hud: bool = False,
 ) -> None:
     x1, y1, x2, y2 = person_box
     available_width = max(1, x2 - x1 - 8)
     line_height = 15
-    panel_bottom = min(y2, y1 + 5 + line_height * len(lines))
-    cv2.rectangle(frame, (x1, y1), (x2, panel_bottom), color, cv2.FILLED)
+    panel_height = 5 + line_height * len(lines)
+    panel_top = y1
+    if (
+        avoid_global_hud
+        and x1 < min(frame.shape[1], GLOBAL_HUD_WIDTH)
+        and y1 < GLOBAL_HUD_MAX_HEIGHT
+    ):
+        panel_top = min(
+            GLOBAL_HUD_MAX_HEIGHT,
+            max(y1, y2 - panel_height),
+        )
+    panel_bottom = min(y2, panel_top + panel_height)
+    cv2.rectangle(
+        frame,
+        (x1, panel_top),
+        (x2, panel_bottom),
+        color,
+        cv2.FILLED,
+    )
     for index, text in enumerate(lines):
         preferred_scale = 0.48 if index == 0 else 0.40
         text_width = cv2.getTextSize(
@@ -681,7 +801,7 @@ def _draw_status_panel(
         cv2.putText(
             frame,
             text,
-            (x1 + 4, y1 + 13 + line_height * index),
+            (x1 + 4, panel_top + 13 + line_height * index),
             cv2.FONT_HERSHEY_SIMPLEX,
             scale,
             (255, 255, 255),
@@ -763,7 +883,7 @@ def _draw_global_hud(
         f"FPS {fps:4.1f} | people {person_count} | identity {'ON' if identity_enabled else 'OFF'}"
     ]
     lines.extend(recent_events[-2:])
-    panel_width = min(frame.shape[1], 520)
+    panel_width = min(frame.shape[1], GLOBAL_HUD_WIDTH)
     panel_height = 24 + 18 * (len(lines) - 1)
     cv2.rectangle(frame, (0, 0), (panel_width, panel_height), (25, 25, 25), cv2.FILLED)
     for index, line in enumerate(lines):

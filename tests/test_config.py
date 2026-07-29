@@ -10,9 +10,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config import AppConfig
+from main import parse_args
 
 
 class EnvironmentConfigTest(unittest.TestCase):
+    def test_activity_is_disabled_by_default(self) -> None:
+        self.assertEqual(AppConfig().activity_model, "none")
+
     def test_invalid_boolean_preserves_the_default(self) -> None:
         with patch.dict(os.environ, {"MONITOR_ALLOW_MODEL_DOWNLOADS": "maybe"}):
             config = AppConfig.from_env()
@@ -24,6 +28,48 @@ class EnvironmentConfigTest(unittest.TestCase):
             config = AppConfig.from_env()
 
         self.assertEqual(config.min_concern_expression_confidence, 0.65)
+
+    def test_activity_environment_values_are_loaded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MONITOR_ACTIVITY_MODEL": "MLP",
+                "MONITOR_ACTIVITY_CONFIDENCE": "0.7",
+                "MONITOR_ACTIVITY_INTERVAL": "3",
+            },
+        ):
+            config = AppConfig.from_env()
+
+        self.assertEqual(config.activity_model, "mlp")
+        self.assertEqual(config.activity_confidence_threshold, 0.7)
+        self.assertEqual(config.activity_inference_interval, 3)
+
+    def test_activity_cli_values_are_parsed(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--detect",
+                "--activity-model",
+                "mlp",
+                "--activity-sequence-length",
+                "16",
+                "--activity-confidence-threshold",
+                "0.6",
+                "--activity-inference-interval",
+                "4",
+                "--activity-smoothing-window",
+                "3",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.activity_model, "mlp")
+        self.assertEqual(args.activity_sequence_length, 16)
+        self.assertEqual(args.activity_confidence_threshold, 0.6)
+        self.assertEqual(args.activity_inference_interval, 4)
+        self.assertEqual(args.activity_smoothing_window, 3)
 
 
 if __name__ == "__main__":

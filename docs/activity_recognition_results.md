@@ -4,8 +4,9 @@
 
 This benchmark compares three compact approaches for recognizing walking,
 running, standing, and sitting while keeping the existing monitoring pipeline
-unchanged. It is an offline experiment; activity recognition is not integrated
-into the live application.
+unchanged. Training and evaluation are offline. The resulting MLP checkpoint
+can also be enabled as an informational per-person label in the live
+application; MobileNetV2 and S3D remain offline comparison models.
 
 ## Dataset And Partitions
 
@@ -139,6 +140,26 @@ The comparison is closed-set: evaluation selects the largest classifier logit
 and does not apply confidence calibration, softmax-based acceptance, or an
 unknown-activity threshold. Torchvision also marks the S3D video-model API as
 beta, so future Torchvision upgrades require compatibility testing.
+
+The optional live MLP applies a configurable threshold to smoothed softmax
+probabilities and reports lower-confidence outputs as `unknown`. That policy
+reduces label flicker but does not calibrate the classifier. Live activity
+labels remain separate from review-tier scoring.
+
+## Live MLP Incremental Latency
+
+The live integration was measured on the same Windows CPU environment using
+the saved MLP checkpoint, a 16-pose sequence, a five-frame inference interval,
+and a five-result smoothing window. Across 516 tracked-person updates and 101
+scheduled inferences, the mean incremental inference path took `0.245 ms`.
+Amortized across every tracked-person update, activity handling took
+`0.146 ms` per frame.
+
+This measurement starts with pose landmarks already supplied by the existing
+YOLO tracking stage. It includes bounding-box pose normalization, history
+management, feature standardization, MLP inference, softmax, thresholding, and
+smoothing. It excludes YOLO, frame decoding, identity and expression models,
+event I/O, and display rendering, so it is not an end-to-end camera FPS result.
 
 ## Reproducibility
 

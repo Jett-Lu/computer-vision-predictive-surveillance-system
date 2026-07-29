@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from pathlib import Path
 
 from config import AppConfig
 
@@ -76,6 +77,36 @@ def parse_args() -> argparse.Namespace:
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Override the MONITOR_LOG_LEVEL setting.",
     )
+    parser.add_argument(
+        "--activity-model",
+        choices=("none", "mlp"),
+        help="Optional live activity model. Default: none",
+    )
+    parser.add_argument(
+        "--activity-checkpoint",
+        type=Path,
+        help="Path to the MLP activity checkpoint.",
+    )
+    parser.add_argument(
+        "--activity-sequence-length",
+        type=int,
+        help="Number of valid tracked poses required for activity inference.",
+    )
+    parser.add_argument(
+        "--activity-confidence-threshold",
+        type=float,
+        help="Minimum smoothed confidence for a named activity.",
+    )
+    parser.add_argument(
+        "--activity-inference-interval",
+        type=int,
+        help="Minimum frames between activity inferences for one track.",
+    )
+    parser.add_argument(
+        "--activity-smoothing-window",
+        type=int,
+        help="Number of activity probability vectors to average.",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +122,32 @@ def main() -> None:
             False if args.no_events else config.event_logging_enabled
         ),
         log_level=args.log_level or config.log_level,
+        activity_model=args.activity_model or config.activity_model,
+        activity_checkpoint_path=(
+            args.activity_checkpoint.resolve()
+            if args.activity_checkpoint is not None
+            else config.activity_checkpoint_path
+        ),
+        activity_sequence_length=(
+            args.activity_sequence_length
+            if args.activity_sequence_length is not None
+            else config.activity_sequence_length
+        ),
+        activity_confidence_threshold=(
+            args.activity_confidence_threshold
+            if args.activity_confidence_threshold is not None
+            else config.activity_confidence_threshold
+        ),
+        activity_inference_interval=(
+            args.activity_inference_interval
+            if args.activity_inference_interval is not None
+            else config.activity_inference_interval
+        ),
+        activity_smoothing_window=(
+            args.activity_smoothing_window
+            if args.activity_smoothing_window is not None
+            else config.activity_smoothing_window
+        ),
     )
     if args.doctor:
         from diagnostics import print_diagnostics, run_diagnostics
@@ -101,8 +158,6 @@ def main() -> None:
             raise SystemExit(1)
         return
     if args.validate:
-        from pathlib import Path
-
         from validation import print_validation_summary, run_validation
 
         results = run_validation(Path(args.manifest), Path(args.report), config)
@@ -111,8 +166,6 @@ def main() -> None:
             raise SystemExit(1)
         return
     if args.process_media:
-        from pathlib import Path
-
         from media_export import export_media
 
         export_media(Path(args.input), Path(args.output_dir), config=config)
