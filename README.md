@@ -63,19 +63,32 @@ This is a demo review indicator, not a conclusion that a person is suspicious
 or dangerous. Facial-expression estimates are uncertain and can reflect many
 ordinary situations.
 
-## Run
+## Install
 
-Python 3.11 or 3.12 is recommended. Create an environment and install the
-tested dependency set:
+Python 3.11 or 3.12 is recommended. For the live monitoring application,
+create an environment and install the core dependency set:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-tested.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe src\main.py --doctor --prepare-models
 ```
 
 On macOS or Linux, use `.venv/bin/python` instead of
 `.venv\Scripts\python.exe`.
+
+`requirements-tested.txt` records the exact core package versions used for the
+July 2026 Windows verification. Use it when you want to recreate that pinned
+environment instead of resolving the supported ranges in `requirements.txt`.
+
+Install the optional activity-recognition dependencies only when running the
+activity benchmark, using activity tests, or enabling a live MLP checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
+```
+
+## Run
 
 ```powershell
 python src/main.py
@@ -196,6 +209,26 @@ Common environment overrides include:
 - `MONITOR_DEBUG_TIMING=true` to log stage timings
 
 Run `python src/main.py --doctor` at any time to check the local installation.
+Use `python src/main.py --doctor --no-model-downloads` after preparation to
+verify offline startup with the local model files.
+
+## Repository Layout
+
+- `src/` contains the live monitoring, model provisioning, diagnostics, media
+  export, validation, and optional activity-recognition packages.
+- `tests/` contains the committed unit tests. Running the full suite requires
+  both core and optional activity dependencies.
+- `scripts/` contains HMDB51 activity benchmark preparation, training, and
+  evaluation entrypoints.
+- `docs/` contains project documentation and measured activity-recognition
+  results.
+- `validation/` contains validation instructions and a sample manifest; local
+  media, manifests, and generated reports are ignored by Git.
+- `input/` and `output/` are runtime folders for media export. Local media,
+  logs, events, and generated outputs are ignored by Git.
+- `data/blaze_face_short_range.tflite` is tracked because MediaPipe expression
+  face detection loads it directly and diagnostics verify it exists. Other
+  model files are downloaded checksum-verified on first use and ignored by Git.
 
 ## Human Activity Recognition Benchmark
 
