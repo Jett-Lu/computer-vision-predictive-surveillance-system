@@ -1,314 +1,434 @@
-# Integrated Live Demo
-<img width="1069" height="598" alt="image" src="https://github.com/user-attachments/assets/86a42448-1c48-4964-a3bd-06a802892731" />
+# Computer Vision Predictive Surveillance System
 
-Live webcam demo combining:
+A real-time computer vision system that combines multi-person tracking, pose
+estimation, identity recognition, facial-expression context, gesture analysis,
+activity recognition, and independent temporal state management.
 
-- multi-person YOLO pose tracking and skeleton rendering
-- repeated raised right-hand wave activity tiers
-- MediaPipe face detection
-- EmotiEffLib facial-expression estimates
-- YOLO person tracking
-- optional enrolled-person identification with OpenCV YuNet + SFace
-- optional per-person MLP activity labels from existing YOLO Pose keypoints
+The project was developed as an applied artificial intelligence portfolio
+piece to explore how multiple computer vision models can be integrated into a
+single processing pipeline.
 
-Each tracked person receives an independent skeleton, wave counter, expression
-context, review overlay, and optional identity and activity labels. Activity
-recognition is disabled by default and remains informational: its output is not
-an input to review-tier scoring. Model downloads are atomic and
-checksum-verified before use.
+<img width="1069" height="598" alt="image" src="https://github.com/user-attachments/assets/98c651a0-158e-46c2-81f4-dbaf38517503" />
 
-## Identity Matching
-<img width="1118" height="624" alt="image" src="https://github.com/user-attachments/assets/546550a0-efeb-4ee6-baf0-524638fbcb93" />
+## Project Overview
 
-Identity matching no longer depends on `dlib` or the `face-recognition`
-package. The default stack uses OpenCV's DNN APIs:
+The system processes live or recorded video and maintains an independent state
+for every tracked person.
 
-- `FaceDetectorYN` with `data/face_detection_yunet_2023mar.onnx`
-- `FaceRecognizerSF` with `data/face_recognition_sface_2021dec.onnx`
+For each detected person, the application can display:
 
-This is easier to install on Windows and is also portable to Linux and macOS
-through `opencv-contrib-python`.
-These two OpenCV model files are downloaded automatically on first use if they
-are not already present. Identity is confirmed only after multiple agreeing
-frames, poor-quality faces are rejected, and confirmed names expire unless
-they are revalidated.
+* a persistent tracking ID
+* pose landmarks and skeleton rendering
+* enrolled-person identity
+* facial-expression context
+* human activity classification
+* completed right-hand wave count
+* current review level
+* recent state changes
 
-The EmotiEffLib expression model is also downloaded from a pinned upstream
-revision and checksum-verified before it is loaded. Once the models have been
-prepared, `--no-model-downloads` provides a fully offline startup check.
+The application combines spatial model outputs with temporal logic. Individual
+detections are not treated as isolated frames. Instead, tracking history,
+gesture events, identity agreement, activity sequences, and expression
+smoothing are maintained separately for each person.
 
-If no enrollments are available, the live monitoring demo continues
-anonymously.
+<img width="1900" height="942" alt="08_system_architecture" src="https://github.com/user-attachments/assets/91d82ae5-3d6d-4b79-9644-05fed2f44c5d" />
 
-## Review Indicator
-<img width="545" height="860" alt="image" src="https://github.com/user-attachments/assets/f0dc70a0-f4f5-42e6-9180-1b26db5841f3" />
+## Key Features
 
-The overlay begins green. Completed right-hand wave gestures are counted in a
-rolling 30-second window, with two waves ignored as likely ordinary activity.
-Review color uses a fixed professional ladder:
+### Multi-Person Detection and Tracking
 
-- `CLEAR` - green
-- `MONITOR` - yellow
-- `REVIEW` - orange
-- `HIGH` - red
+YOLO Pose and ByteTrack are used to detect and track multiple people.
 
-The best expression estimate remains visible even at lower confidence; a `?`
-marks a tentative label. Per-person estimates use a short rolling vote to
-reduce flicker. High-confidence `Anger`, `Contempt`, `Disgust`, `Fear`, and
-`Sadness` estimates also appear as a separate expression-context signal.
-Expression does not change the behavior-based review tier, and both the label
-and context clear when the face is no longer visible.
+Each person receives a persistent track ID so that identity, gestures,
+activities, expressions, and review state can be maintained independently over
+time.
 
-This is a demo review indicator, not a conclusion that a person is suspicious
-or dangerous. Facial-expression estimates are uncertain and can reflect many
-ordinary situations.
+### Pose Estimation
 
-## Install
+YOLO Pose estimates 17 body keypoints, including:
 
-Python 3.11 or 3.12 is recommended. For the live monitoring application,
-create an environment and install the core dependency set:
+* shoulders
+* elbows
+* wrists
+* hips
+* knees
+* ankles
+
+The pose landmarks are used for skeleton visualization, wave detection, and
+pose-based activity recognition.
+
+### Identity Recognition
+
+Optional identity recognition uses OpenCV DNN models:
+
+* YuNet for face detection
+* SFace for face recognition
+
+Identity confirmation requires agreement across multiple frames. Low-quality
+faces are rejected, and confirmed identities expire unless they are
+revalidated.
+
+The application continues anonymously when no enrolled identities are
+available.
+
+<img width="1118" height="624" alt="623024201-546550a0-efeb-4ee6-baf0-524638fbcb93" src="https://github.com/user-attachments/assets/27bed33e-6ba6-478d-855f-aaa41191843d" />
+
+### Facial-Expression Context
+
+MediaPipe is used to locate visible faces within tracked person regions.
+EmotiEffLib then estimates facial-expression context.
+
+A rolling smoothing window reduces label flicker. Lower-confidence estimates
+can remain visible with a `?` indicator to show that the classification is
+tentative.
+
+Expression estimates are informational and do not directly change the
+behavior-based review level.
+
+### Repeated-Wave Detection
+
+The system detects completed raised right-hand wave gestures using temporal
+pose information.
+
+Wave events are counted within a rolling time window. The first two completed
+waves are treated as ordinary activity, while additional repeated waves
+increase the review level.
+
+### Review Levels
+
+The application uses four behavior-based review states:
+
+* `CLEAR`: green
+* `MONITOR`: yellow
+* `REVIEW`: orange
+* `HIGH`: red
+
+The review state is based on repeated temporal gesture activity. Identity,
+facial expression, and activity classifications remain separate contextual
+signals.
+
+<img width="800" height="533" alt="state_isolation_sequence_annotated-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/24ff5e5b-df0e-4e5f-a347-b9d4f4f8dbff" />
+
+### Independent Multi-Person State
+
+Each tracked person has an independent:
+
+* identity state
+* wave history
+* expression history
+* activity sequence
+* review level
+* event history
+
+One person's activity does not affect the state assigned to another person.
+
+## Human Activity Recognition
+
+The project includes an activity-recognition benchmark for:
+
+* walking
+* running
+* standing
+* sitting
+
+Three approaches were evaluated using the same source-video partitions.
+
+### MLP Pose Model
+
+The MLP uses sequences of normalized YOLO Pose landmarks.
+
+Each sample contains 16 frames of:
+
+* 17 keypoint x-coordinates
+* 17 keypoint y-coordinates
+* 17 keypoint visibility values
+
+The saved MLP checkpoint can also be enabled in the main application to provide
+informational per-person activity labels.
+
+### MobileNetV2
+
+The image-based approach uses cached features extracted from a frozen
+ImageNet-pretrained MobileNetV2 backbone.
+
+A four-class linear classification head is trained using the cached features.
+
+### S3D
+
+The advanced video approach uses cached features extracted from a frozen
+Kinetics-400-pretrained S3D model.
+
+A four-class linear classification head is trained on the resulting temporal
+video features.
+
+## Activity Recognition Results
+
+The models were evaluated using 120 held-out HMDB51 test videos.
+
+| Model       | Accuracy | Macro F1 | Head Training Time | CPU Inference Latency |
+| ----------- | -------: | -------: | -----------------: | --------------------: |
+| MLP         |   46.67% |   47.00% |            0.219 s |              0.262 ms |
+| MobileNetV2 |   47.50% |   46.02% |            0.111 s |              80.73 ms |
+| S3D         |   42.50% |   41.35% |            0.065 s |             293.31 ms |
+
+MobileNetV2 achieved the highest accuracy, while the MLP produced the highest
+macro F1 and substantially lower inference latency.
+
+The MLP was selected for optional real-time integration because it reuses the
+pose landmarks already generated by the tracking pipeline and does not require
+an additional image or video backbone during inference.
+
+<img width="1600" height="640" alt="10_training_curves" src="https://github.com/user-attachments/assets/75561f0f-dc47-4e7e-a4bb-dda5674cdb05" /><img width="864" height="736" alt="13_s3d_confusion_matrix" src="https://github.com/user-attachments/assets/1a26418a-3605-4d0c-b60d-9f2f4974ee45" />
+<img width="864" height="736" alt="12_mobilenetv2_confusion_matrix" src="https://github.com/user-attachments/assets/43588d4e-4cb0-4950-ab2d-3c2f789de65c" />
+<img width="864" height="736" alt="11_mlp_confusion_matrix" src="https://github.com/user-attachments/assets/aad573e2-0b83-4f72-8d9b-10161263ca24" />
+
+
+Additional measured results and interpretation are available in:
+
+```text
+docs/activity_recognition_results.md
+```
+
+## System Architecture
+
+The processing pipeline is divided into independent components:
+
+1. Video frame acquisition
+2. YOLO Pose person detection
+3. ByteTrack identity assignment
+4. Pose landmark extraction
+5. Gesture-state updates
+6. Optional face and identity analysis
+7. Facial-expression estimation and smoothing
+8. Optional MLP activity inference
+9. Per-person temporal state updates
+10. Review-level calculation
+11. Annotation rendering
+12. Structured event logging
+
+The activity model reuses YOLO Pose results already generated by the main
+pipeline. It does not run an additional pose model.
+
+## Technology Stack
+
+### Computer Vision
+
+* OpenCV
+* Ultralytics YOLOv8 Pose
+* ByteTrack
+* MediaPipe
+* YuNet
+* SFace
+* EmotiEffLib
+
+### Machine Learning
+
+* PyTorch
+* Torchvision
+* NumPy
+* MobileNetV2
+* S3D
+* multilayer perceptron
+
+### Development and Validation
+
+* Python 3.11 and 3.12
+* GitHub Actions
+* Python `unittest`
+* JSONL event logging
+* manifest-based validation
+* checksum-verified model provisioning
+
+## Repository Structure
+
+```text
+computer-vision-predictive-surveillance-system/
+├── .github/
+│   └── workflows/
+├── data/
+├── docs/
+│   └── images/
+├── input/
+├── output/
+├── scripts/
+├── src/
+│   └── activity_recognition/
+├── tests/
+├── validation/
+├── pyproject.toml
+├── requirements.txt
+├── requirements-tested.txt
+├── requirements-activity.txt
+└── README.md
+```
+
+### Main Directories
+
+* `src/` contains the main application and computer vision components.
+* `src/activity_recognition/` contains the activity dataset, preprocessing,
+  models, training, evaluation, metrics, and optional live MLP integration.
+* `scripts/` contains the activity data preparation, training, and evaluation
+  entry points.
+* `tests/` contains the automated unit and integration tests.
+* `validation/` contains the scenario-based validation framework.
+* `docs/` contains technical documentation and experiment results.
+* `input/` stores local photos or videos selected for processing.
+* `output/` stores generated media, logs, events, and benchmark results.
+* `data/` stores local model files, datasets, feature caches, and checkpoints.
+
+Generated files, downloaded datasets, checkpoints, enrollments, logs, and
+outputs are excluded from version control.
+
+## Installation
+
+Python 3.11 or 3.12 is recommended.
+
+Create a virtual environment:
 
 ```powershell
 python -m venv .venv
+```
+
+Install the core dependencies:
+
+```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Prepare and verify the required model files:
+
+```powershell
 .\.venv\Scripts\python.exe src\main.py --doctor --prepare-models
 ```
 
-On macOS or Linux, use `.venv/bin/python` instead of
-`.venv\Scripts\python.exe`.
+On macOS or Linux, replace:
 
-`requirements-tested.txt` records the exact core package versions used for the
-July 2026 Windows verification. Use it when you want to recreate that pinned
-environment instead of resolving the supported ranges in `requirements.txt`.
+```text
+.\.venv\Scripts\python.exe
+```
 
-Install the optional activity-recognition dependencies only when running the
-activity benchmark, using activity tests, or enabling a live MLP checkpoint:
+with:
+
+```text
+.venv/bin/python
+```
+
+### Exact Tested Environment
+
+`requirements-tested.txt` records the exact core package versions used during
+the July 2026 Windows verification.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-tested.txt
+```
+
+### Optional Activity Dependencies
+
+Install the activity-recognition dependencies when training, evaluating, or
+using the MLP activity checkpoint:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
 ```
 
-## Run
+## Running the Application
+
+Open the application menu:
 
 ```powershell
 python src/main.py
 ```
 
-Use `enroll` to add identity photos and `detect` to start live monitoring.
-Press `q` to close the camera window.
+The menu provides options for:
 
-The live HUD shows FPS, active people, identity availability, and recent
-operator events. Detailed logs are written to `output/logs`, and meaningful
-tier, identity, wave, and expression changes are written as JSONL files under
-`output/events`.
+* enrolling identities
+* starting real-time processing
+* deleting existing enrollments
 
-To bypass the menu and launch a camera directly:
+To start processing directly:
 
 ```powershell
-python src/main.py --detect --source 1
+python src/main.py --detect --source 0
 ```
 
-Camera source `0` is usually the built-in webcam. Source `1` is often an
-external USB camera.
+Camera source `0` generally represents the built-in camera. Other camera
+indices, video paths, and supported stream sources can also be provided.
 
-### Optional Live Activity Labels
+Press `q` to close the processing window.
 
-Live MLP activity recognition supports `walking`, `running`, `standing`, and
-`sitting`. It reuses the YOLO Pose results already produced for each ByteTrack
-ID; it does not run a second pose model. Install the optional dependencies and
-provide a compatible checkpoint:
+## Processing Recorded Media
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
-.\.venv\Scripts\python.exe src\main.py --detect --source 0 `
-  --activity-model mlp `
-  --activity-checkpoint "data\activity_models\mlp.pt"
-```
-
-The default checkpoint path is `data/activity_models/mlp.pt`, which is created
-by `scripts/train_activity_models.py` and intentionally excluded from version
-control. The checkpoint must contain the canonical label order and the same
-16-frame sequence length used by the live configuration.
-
-The live runtime waits for 16 valid tracked poses, performs MLP inference every
-five frames by default, and averages the five most recent probability vectors.
-Predictions below the default `0.50` confidence threshold are displayed as
-`Unknown`. Missing poses do not invoke the classifier, and an all-zero history
-is handled as `Unknown`. History and smoothing state are independent per track
-and are removed when a track expires or tracking resets.
-
-Activity labels and confidence appear in the per-person overlay and optional
-event report. They do not increase or decrease review tiers.
-
-## Export An Annotated Photo Or Video
-
-Place a photo or recorded video in the `input` folder, then run:
+Place a supported image or video in the `input` directory:
 
 ```powershell
 python src/main.py --process-media
 ```
 
-Annotated copies are written to the `output` folder. The command supports
-photos (`.bmp`, `.jpeg`, `.jpg`, `.png`, `.webp`) and videos (`.avi`, `.m4v`,
-`.mkv`, `.mov`, `.mp4`).
+Annotated files are written to the `output` directory.
 
-On Windows, you can also double-click `Run Media Export.cmd`.
-
-You can also process one specific file:
+To process one specific file:
 
 ```powershell
-python src/main.py --process-media --input "input\photo.jpg"
+python src/main.py --process-media --input "input\sample.mp4"
 ```
 
-## Demo-Only High Review Override
+Supported image formats include:
 
-For controlled demos, an enrolled identity can be displayed in the red `HIGH`
-tier without waiting for repeated activity to accumulate:
+* `.bmp`
+* `.jpeg`
+* `.jpg`
+* `.png`
+* `.webp`
+
+Supported video formats include:
+
+* `.avi`
+* `.m4v`
+* `.mkv`
+* `.mov`
+* `.mp4`
+
+## Enabling Live Activity Recognition
+
+Train the activity models first:
 
 ```powershell
-$env:DEMO_HIGH_REVIEW_NAMES = "Taylor Brooks"
-python src/main.py --process-media --input "input\demo.png"
+.\.venv\Scripts\python.exe scripts\train_activity_models.py
 ```
 
-This override is only for staged demonstrations. A visible `DEMO OVERRIDE
-ACTIVE` watermark is drawn whenever it affects a person. Leave
-`DEMO_HIGH_REVIEW_NAMES` unset for normal runs.
+The default MLP checkpoint is generated at:
 
-## Validate The POC
-
-Copy `validation/manifest.example.json` to `validation/manifest.json`, add
-consented recorded scenarios under `validation/media`, then run:
-
-```powershell
-.\.venv\Scripts\python.exe src\main.py --validate `
-  --manifest validation\manifest.json `
-  --report validation\reports\latest.json
+```text
+data/activity_models/mlp.pt
 ```
 
-The runner measures people detected, confirmed identities, tier counts, and
-processing FPS, and returns a failing exit code when a scenario misses its
-acceptance criteria. See `validation/README.md` for the recommended scenario
-set.
-
-## Runtime Configuration
-
-Common environment overrides include:
-
-- `MONITOR_ALLOW_MODEL_DOWNLOADS=false` for verified offline operation
-- `MONITOR_IDENTITY_THRESHOLD=0.363` for a calibrated SFace threshold
-- `MONITOR_EXPRESSION_CONFIDENCE=0.65` for expression context visibility
-- `MONITOR_EXPRESSION_DISPLAY_CONFIDENCE=0.45` for tentative `?` labels
-- `MONITOR_EXPRESSION_SMOOTHING_SECONDS=0.8` for display stability
-- `MONITOR_ACTIVITY_MODEL=none` or `mlp`
-- `MONITOR_ACTIVITY_CHECKPOINT=data/activity_models/mlp.pt`
-- `MONITOR_ACTIVITY_SEQUENCE_LENGTH=16`
-- `MONITOR_ACTIVITY_CONFIDENCE=0.50`
-- `MONITOR_ACTIVITY_INTERVAL=5`
-- `MONITOR_ACTIVITY_SMOOTHING_WINDOW=5`
-- `MONITOR_EVENT_LOGGING=false` to disable JSONL event reports
-- `MONITOR_DEBUG_TIMING=true` to log stage timings
-
-Run `python src/main.py --doctor` at any time to check the local installation.
-Use `python src/main.py --doctor --no-model-downloads` after preparation to
-verify offline startup with the local model files.
-
-## Repository Layout
-
-- `src/` contains the live monitoring, model provisioning, diagnostics, media
-  export, validation, and optional activity-recognition packages.
-- `tests/` contains the committed unit tests. Running the full suite requires
-  both core and optional activity dependencies.
-- `scripts/` contains HMDB51 activity benchmark preparation, training, and
-  evaluation entrypoints.
-- `docs/` contains project documentation and measured activity-recognition
-  results.
-- `validation/` contains validation instructions and a sample manifest; local
-  media, manifests, and generated reports are ignored by Git.
-- `input/` and `output/` are runtime folders for media export. Local media,
-  logs, events, and generated outputs are ignored by Git.
-- `data/blaze_face_short_range.tflite` is tracked because MediaPipe expression
-  face detection loads it directly and diagnostics verify it exists. Other
-  model files are downloaded checksum-verified on first use and ignored by Git.
-
-## Human Activity Recognition Benchmark
-
-The repository includes an optional benchmark for four human activities:
-`walking`, `running`, `standing`, and `sitting`. The MLP checkpoint can be
-enabled in the live monitoring pipeline as described above. MobileNetV2 and
-S3D remain offline comparison models. Existing behavior is unchanged when the
-activity model is `none`.
-
-Three compact approaches use the same source-video partitions:
-
-- **MLP:** a small network trained on 16 frames of bounding-box-normalized YOLO
-  Pose coordinates and visibility values.
-- **CNN:** a four-class linear head trained on cached features from a frozen
-  ImageNet-pretrained MobileNetV2.
-- **Advanced video model:** a four-class linear head trained on cached features
-  from a frozen Kinetics-400-pretrained S3D model.
-
-The frozen feature caches make repeated head training fast and avoid rerunning
-YOLO or the pretrained backbones every epoch. TensorFlow is not used by this
-benchmark.
-
-### Dataset
-
-The benchmark expects the official
-[HMDB51](https://serre-lab.clps.brown.edu/wp-content/uploads/2013/10/hmdb51_org.rar)
-videos and
-[official split files](https://serre-lab.clps.brown.edu/wp-content/uploads/2013/10/test_train_splits.rar),
-restricted to the `walk`, `run`, `stand`, and `sit` classes. Fold 1 is the
-default. Official test clips remain untouched; the official training clips are
-divided deterministically into training and validation sets at the video level.
-Derived frames from one source video never cross partitions.
-
-HMDB51 contains clips collected from varied movie and internet-video sources.
-Its distribution does not present a simple permissive software-style license.
-Review the source terms before commercial use, do not redistribute the videos,
-and keep the dataset outside version control.
-
-### Model And Dataset Sources
-
-- Pose extraction uses
-  [Ultralytics YOLOv8 Pose](https://docs.ultralytics.com/models/yolov8/).
-  Ultralytics documents AGPL-3.0 and enterprise licensing options for its code
-  and pretrained models; verify that the selected option fits the deployment.
-- The image backbone uses Torchvision
-  [MobileNetV2](https://docs.pytorch.org/vision/stable/models/mobilenetv2.html)
-  with `MobileNet_V2_Weights.DEFAULT`.
-- The video backbone uses Torchvision
-  [S3D](https://docs.pytorch.org/vision/main/models/generated/torchvision.models.video.s3d.html)
-  with `S3D_Weights.KINETICS400_V1`. Torchvision marks its video-model API as
-  beta.
-- Torchvision source code uses the
-  [BSD 3-Clause license](https://github.com/pytorch/vision/blob/main/LICENSE).
-  Its maintainers note that pretrained weights can also carry terms inherited
-  from their training data. Review model and dataset terms for the intended
-  use.
-
-Extract the video archive and split archive, then prepare the one-time cache:
+Enable the saved MLP checkpoint:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
+.\.venv\Scripts\python.exe src\main.py --detect --source 0 `
+  --activity-model mlp `
+  --activity-checkpoint "data\activity_models\mlp.pt"
+```
+
+The activity recognizer:
+
+* waits for 16 valid pose frames
+* performs inference every five frames by default
+* smooths the five most recent probability vectors
+* displays low-confidence predictions as `Unknown`
+* stores separate pose and prediction histories for each tracked person
+
+## Activity Benchmark
+
+Prepare the HMDB51 data:
+
+```powershell
 .\.venv\Scripts\python.exe scripts\prepare_activity_data.py `
   --dataset-root "data\hmdb51\hmdb51_org" `
   --annotations-root "data\hmdb51\splits"
 ```
 
-When the original archive endpoint is unavailable, the fold-1 CSV metadata and
-individual clips from the
-[HMDB51 Hugging Face mirror](https://huggingface.co/datasets/Sina272/hmdb51-v2)
-can be used to download only the four target classes:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\prepare_activity_data.py `
-  --dataset-root "data\hmdb51\subset" `
-  --metadata-train "data\hmdb51\metadata_train.csv" `
-  --metadata-test "data\hmdb51\metadata_test.csv" `
-  --download-videos
-```
-
-Train all three heads and immediately evaluate the official test split:
+Train and evaluate all three models:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\train_activity_models.py
@@ -320,24 +440,208 @@ Evaluate existing checkpoints without retraining:
 .\.venv\Scripts\python.exe scripts\evaluate_activity_models.py
 ```
 
-Measured outputs are written to `output/activity_results`:
+Generated results are written to:
 
-- `metrics.json`
-- `model_comparison.csv`
-- `predictions.csv`
-- `mlp_confusion_matrix.png`
-- `cnn_confusion_matrix.png`
-- `advanced_confusion_matrix.png`
-- `training_curves.png`
-- `run_manifest.json`
+```text
+output/activity_results/
+```
 
-Accuracy, macro precision, macro recall, macro F1, confusion matrices, head
-training time, and measured inference latency are calculated from real
-predictions. Dataset files, caches, checkpoints, and generated reports are
-ignored by Git.
+The generated files include:
 
-The measured experiment and its interpretation are recorded in
-[`docs/activity_recognition_results.md`](docs/activity_recognition_results.md).
+* `metrics.json`
+* `model_comparison.csv`
+* `predictions.csv`
+* `mlp_confusion_matrix.png`
+* `cnn_confusion_matrix.png`
+* `advanced_confusion_matrix.png`
+* `training_curves.png`
+* `run_manifest.json`
 
-Benchmark training and evaluation remain offline. Only the saved MLP head is
-available for optional live inference.
+## Validation
+
+Copy the example validation manifest:
+
+```powershell
+Copy-Item validation\manifest.example.json validation\manifest.json
+```
+
+Add consented validation media under:
+
+```text
+validation/media/
+```
+
+Run the validation framework:
+
+```powershell
+.\.venv\Scripts\python.exe src\main.py --validate `
+  --manifest validation\manifest.json `
+  --report validation\reports\latest.json
+```
+
+The validation runner measures:
+
+* number of people detected
+* confirmed identities
+* review-state counts
+* processing performance
+* scenario acceptance criteria
+
+## Testing
+
+Install both the core and optional activity dependencies before running the
+complete test suite:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-activity.txt
+```
+
+Check dependency consistency:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip check
+```
+
+Compile the source and tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m compileall -q src tests
+```
+
+Run all tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+The verified repository currently contains 93 passing tests.
+
+Install the repository as an editable Python project:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+## Model Provisioning
+
+The application automatically downloads several required models when they are
+not present locally.
+
+Downloads use:
+
+* pinned upstream revisions
+* expected SHA-256 checksums
+* temporary download files
+* atomic file replacement
+* configurable retry behavior
+
+Prepare all downloadable models:
+
+```powershell
+python src/main.py --doctor --prepare-models
+```
+
+Verify operation without allowing new downloads:
+
+```powershell
+python src/main.py --doctor --no-model-downloads
+```
+
+The MediaPipe face detector model at
+`data/blaze_face_short_range.tflite` is stored in the repository because it is
+loaded directly by the expression-analysis component.
+
+Other downloaded model files are excluded from version control.
+
+## Design Considerations
+
+### Temporal Processing
+
+Many computer vision systems evaluate each frame independently. This project
+uses temporal state to support:
+
+* repeated-gesture detection
+* identity confirmation
+* identity expiration
+* expression smoothing
+* pose-sequence activity recognition
+* review-level progression
+* stale-track cleanup
+
+### Shared Pose Inference
+
+The activity-recognition system does not run YOLO Pose a second time.
+
+The existing pose results are reused for:
+
+* skeleton rendering
+* wave detection
+* activity feature generation
+
+This reduces redundant computation.
+
+### Independent Track State
+
+State is keyed by the persistent tracking ID. This prevents one person's
+identity, activity, expression, or gesture history from being assigned to
+another person.
+
+### Offline Reproducibility
+
+The project supports offline verification after model preparation through:
+
+```powershell
+python src/main.py --doctor --no-model-downloads
+```
+
+Datasets, generated checkpoints, feature caches, reports, and output media are
+kept outside Git version control.
+
+## Limitations
+
+* Activity recognition was evaluated using a limited four-class subset of
+  HMDB51.
+* The benchmark contained 120 held-out test videos.
+* Performance may change under different lighting, camera angles, clothing,
+  movement speeds, occlusion, and environmental conditions.
+* Facial-expression estimates do not establish a person's intent or emotional
+  state.
+* Identity recognition depends on enrollment quality and visible facial
+  features.
+* Review levels are demonstration-oriented behavioral indicators and are not
+  security conclusions.
+* The benchmark models were not trained end to end.
+* MobileNetV2 and S3D use frozen pretrained feature extractors.
+* Real-world deployment would require broader validation, privacy review,
+  fairness analysis, security controls, and legal assessment.
+
+## Responsible Use
+
+This project is intended for academic evaluation, technical experimentation,
+and portfolio presentation.
+
+It does not determine whether a person is suspicious, dangerous, or engaged in
+wrongdoing.
+
+Pose, identity, expression, and activity predictions can be incorrect or
+affected by:
+
+* lighting
+* camera placement
+* occlusion
+* image quality
+* appearance
+* disability
+* environmental conditions
+* model and dataset limitations
+
+Any real-world application would require:
+
+* informed consent
+* appropriate data governance
+* human oversight
+* access controls
+* bias and fairness evaluation
+* privacy protection
+* compliance with applicable laws and organizational policies
